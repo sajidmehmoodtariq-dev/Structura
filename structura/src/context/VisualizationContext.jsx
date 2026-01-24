@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useReducer, useCallback } from 'react';
+import React, { createContext, useContext, useReducer, useCallback, useRef, useEffect } from 'react';
 
 // Initial State
 const initialState = {
@@ -121,6 +121,13 @@ const VisualizationContext = createContext();
 // Provider Component
 export function VisualizationProvider({ children }) {
   const [state, dispatch] = useReducer(visualizationReducer, initialState);
+  
+  // Use ref to always have access to latest state
+  const stateRef = useRef(state);
+  
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   // Action Creators
   const reset = useCallback(() => dispatch({ type: ACTIONS.RESET }), []);
@@ -152,6 +159,10 @@ export function VisualizationProvider({ children }) {
   const setError = useCallback((error) => 
     dispatch({ type: ACTIONS.SET_ERROR, payload: error }), []);
 
+  // Add getState function to access current state
+  // Use ref to get latest state synchronously
+  const getState = useCallback(() => stateRef.current, []);
+
   const value = {
     state,
     actions: {
@@ -165,7 +176,8 @@ export function VisualizationProvider({ children }) {
       setLine,
       setStatus,
       setError
-    }
+    },
+    getState
   };
 
   return (
