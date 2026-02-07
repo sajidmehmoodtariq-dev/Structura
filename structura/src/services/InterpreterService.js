@@ -12,6 +12,7 @@ class InterpreterService {
     this.executionSteps = [];
     this.memoryAddressCounter = 0x7FFE1A00; // Mock stack addresses
     this.variableAddresses = new Map(); // Track variable name -> address mapping
+    this.runtimeVariables = new Map(); // Synchronous runtime state for condition evaluation
   }
 
   /**
@@ -51,6 +52,7 @@ class InterpreterService {
     this.tree = tree;
     this.memoryAddressCounter = 0x7FFE1A00;
     this.executionSteps = [];
+    this.runtimeVariables = new Map();
     this.variableAddresses.clear();
     
     this.analyzeNode(tree.rootNode);
@@ -134,6 +136,22 @@ class InterpreterService {
 
       case 'expression_statement':
         this.analyzeExpressionStatement(node);
+        break;
+
+      case 'if_statement':
+        this.analyzeIfStatement(node);
+        break;
+
+      case 'switch_statement':
+        this.analyzeSwitchStatement(node);
+        break;
+
+      case 'while_statement':
+        this.analyzeWhileStatement(node);
+        break;
+
+      case 'for_statement':
+        this.analyzeForStatement(node);
         break;
 
       case 'return_statement':
@@ -477,6 +495,407 @@ class InterpreterService {
   }
 
   /**
+   * Analyze if statement (handles if, if-else, nested if)
+   */
+  analyzeIfStatement(node) {
+    const condition = node.childForFieldName('condition');
+    const consequence = node.childForFieldName('consequence');
+    const alternative = node.childForFieldName('alternative');
+
+    // Store both branches, but mark them - execution will decide which to run
+    const ifStatementIndex = this.executionSteps.length;
+    this.executionSteps.push({
+      type: 'IF_STATEMENT',
+      line: node.startPosition.row + 1,
+      data: {
+        condition: condition?.text || '',
+        hasTrueBranch: !!consequence,
+        hasFalseBranch: !!alternative
+      }
+    });
+
+    // Analyze true branch (mark steps as conditional)
+    if (consequence) {
+      const trueBranchStart = this.executionSteps.length;
+      this.analyzeCompoundOrStatement(consequence);
+      const trueBranchEnd = this.executionSteps.length;
+      
+      // Mark all steps in true branch (push to array so nested ifs don't overwrite)
+      for (let i = trueBranchStart; i < trueBranchEnd; i++) {
+        if (!this.executionSteps[i].conditionalBranches) {
+          this.executionSteps[i].conditionalBranches = [];
+        }
+        this.executionSteps[i].conditionalBranches.push({
+          branch: 'if-true',
+          parent: ifStatementIndex
+        });
+      }
+    }
+
+    // Analyze false branch (mark steps as conditional)
+    if (alternative) {
+      const falseBranchStart = this.executionSteps.length;
+      this.analyzeCompoundOrStatement(alternative);
+      const falseBranchEnd = this.executionSteps.length;
+      
+      // Mark all steps in false branch (push to array so nested ifs don't overwrite)
+      for (let i = falseBranchStart; i < falseBranchEnd; i++) {
+        if (!this.executionSteps[i].conditionalBranches) {
+          this.executionSteps[i].conditionalBranches = [];
+        }
+        this.executionSteps[i].conditionalBranches.push({
+          branch: 'if-false',
+          parent: ifStatementIndex
+        });
+      }
+    }
+  }
+
+  /**
+   * Analyze switch statement
+   * Like if/else, we generate ALL case steps but mark them with conditionalBranches
+   * so the runtime executor can skip the non-matching ones.
+   */
+  analyzeSwitchStatement(node) {
+    const condition = node.childForFieldName('condition');
+    const body = node.childForFieldName('body');
+
+    // Get the variable name being switched on
+    const switchVarName = condition?.namedChild(0)?.text || '';
+
+    const switchStepIndex = this.executionSteps.length;
+    this.executionSteps.push({
+      type: 'SWITCH_STATEMENT',
+      line: node.startPosition.row + 1,
+      data: {
+        variable: switchVarName
+      }
+    });
+
+    if (body) {
+      // Collect all cases with their values
+      const cases = [];
+      let defaultCaseNode = null;
+
+      for (let i = 0; i < body.namedChildCount; i++) {
+        const caseNode = body.namedChild(i);
+        if (caseNode.type === 'case_statement') {
+          const valueNode = caseNode.childForFieldName('value');
+          const caseValue = valueNode ? valueNode.text : null;
+          cases.push({ node: caseNode, value: caseValue });
+        } else if (caseNode.type === 'default_statement') {
+          defaultCaseNode = caseNode;
+        }
+      }
+
+      // Generate steps for each case, marking them with the case value
+      for (const caseInfo of cases) {
+        const branchStart = this.executionSteps.length;
+
+        this.executionSteps.push({
+          type: 'ENTER_CASE',
+          line: caseInfo.node.startPosition.row + 1,
+          data: { value: caseInfo.value }
+        });
+
+        // Analyze all statements in this case (skip the value literal and break)
+        for (let j = 0; j < caseInfo.node.namedChildCount; j++) {
+          const stmt = caseInfo.node.namedChild(j);
+          if (stmt.type !== 'number_literal' && stmt.type !== 'identifier') {
+            // Skip break_statement - it's just case termination
+            if (stmt.type === 'break_statement') continue;
+            this.analyzeStatement(stmt);
+          }
+        }
+
+        const branchEnd = this.executionSteps.length;
+
+        // Mark all steps with the case value so they can be skipped at runtime
+        for (let k = branchStart; k < branchEnd; k++) {
+          if (!this.executionSteps[k].conditionalBranches) {
+            this.executionSteps[k].conditionalBranches = [];
+          }
+          this.executionSteps[k].conditionalBranches.push({
+            branch: `case-${caseInfo.value}`,
+            parent: switchStepIndex
+          });
+        }
+      }
+
+      // Generate steps for default case
+      if (defaultCaseNode) {
+        const defaultStart = this.executionSteps.length;
+
+        this.executionSteps.push({
+          type: 'ENTER_CASE',
+          line: defaultCaseNode.startPosition.row + 1,
+          data: { value: 'default' }
+        });
+
+        for (let j = 0; j < defaultCaseNode.namedChildCount; j++) {
+          const stmt = defaultCaseNode.namedChild(j);
+          if (stmt.type === 'break_statement') continue;
+          this.analyzeStatement(stmt);
+        }
+
+        const defaultEnd = this.executionSteps.length;
+
+        for (let k = defaultStart; k < defaultEnd; k++) {
+          if (!this.executionSteps[k].conditionalBranches) {
+            this.executionSteps[k].conditionalBranches = [];
+          }
+          this.executionSteps[k].conditionalBranches.push({
+            branch: 'case-default',
+            parent: switchStepIndex
+          });
+        }
+      }
+    }
+  }
+
+  /**
+   * Analyze while statement
+   */
+  analyzeWhileStatement(node) {
+    const condition = node.childForFieldName('condition');
+    const body = node.childForFieldName('body');
+    
+    // For visualization, we'll show loop entry and limit iterations
+    const MAX_ITERATIONS = 10;
+    
+    for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+      const conditionResult = this.evaluateCondition(condition);
+      
+      this.executionSteps.push({
+        type: 'EVALUATE_LOOP_CONDITION',
+        line: node.startPosition.row + 1,
+        data: {
+          condition: condition?.text || '',
+          result: conditionResult,
+          iteration: iteration
+        }
+      });
+
+      if (!conditionResult) break;
+
+      this.executionSteps.push({
+        type: 'ENTER_LOOP',
+        line: node.startPosition.row + 1,
+        data: { iteration: iteration }
+      });
+
+      if (body) {
+        this.analyzeCompoundOrStatement(body);
+      }
+
+      this.executionSteps.push({
+        type: 'EXIT_LOOP_ITERATION',
+        line: body?.endPosition.row + 1 || node.startPosition.row + 1,
+        data: { iteration: iteration }
+      });
+    }
+  }
+
+  /**
+   * Analyze for statement
+   */
+  analyzeForStatement(node) {
+    const initializer = node.childForFieldName('initializer');
+    const condition = node.childForFieldName('condition');
+    const update = node.childForFieldName('update');
+    const body = node.childForFieldName('body');
+
+    // Initialize
+    if (initializer) {
+      this.analyzeStatement(initializer);
+    }
+
+    const MAX_ITERATIONS = 10;
+    
+    for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+      // Check condition
+      const conditionResult = condition ? this.evaluateCondition(condition) : true;
+      
+      this.executionSteps.push({
+        type: 'EVALUATE_LOOP_CONDITION',
+        line: node.startPosition.row + 1,
+        data: {
+          condition: condition?.text || 'true',
+          result: conditionResult,
+          iteration: iteration
+        }
+      });
+
+      if (!conditionResult) break;
+
+      this.executionSteps.push({
+        type: 'ENTER_LOOP',
+        line: node.startPosition.row + 1,
+        data: { iteration: iteration }
+      });
+
+      // Execute body
+      if (body) {
+        this.analyzeCompoundOrStatement(body);
+      }
+
+      // Update
+      if (update) {
+        this.analyzeExpressionStatement(update);
+      }
+
+      this.executionSteps.push({
+        type: 'EXIT_LOOP_ITERATION',
+        line: body?.endPosition.row + 1 || node.startPosition.row + 1,
+        data: { iteration: iteration }
+      });
+    }
+  }
+
+  /**
+   * Analyze compound statement or single statement
+   */
+  analyzeCompoundOrStatement(node) {
+    if (node.type === 'compound_statement') {
+      for (let i = 0; i < node.namedChildCount; i++) {
+        this.analyzeStatement(node.namedChild(i));
+      }
+    } else {
+      this.analyzeStatement(node);
+    }
+  }
+
+  /**
+   * Evaluate a condition (comparison, boolean expression)
+   */
+  evaluateCondition(conditionNode) {
+    if (!conditionNode) return false;
+
+    // Extract the actual condition from parenthesized_expression
+    let condition = conditionNode;
+    if (condition.type === 'parenthesized_expression') {
+      condition = condition.namedChild(0);
+    }
+
+    if (!condition) return false;
+
+    // Handle binary expressions (>, <, ==, !=, >=, <=, &&, ||)
+    if (condition.type === 'binary_expression') {
+      const left = condition.childForFieldName('left');
+      const right = condition.childForFieldName('right');
+      const operator = condition.children.find(c => 
+        ['>', '<', '==', '!=', '>=', '<=', '&&', '||'].includes(c.text)
+      );
+
+      if (!operator) return false;
+
+      const leftValue = this.evaluateExpression(left);
+      const rightValue = this.evaluateExpression(right);
+
+      switch (operator.text) {
+        case '>': return leftValue > rightValue;
+        case '<': return leftValue < rightValue;
+        case '>=': return leftValue >= rightValue;
+        case '<=': return leftValue <= rightValue;
+        case '==': return leftValue == rightValue;
+        case '!=': return leftValue != rightValue;
+        case '&&': return leftValue && rightValue;
+        case '||': return leftValue || rightValue;
+        default: return false;
+      }
+    }
+
+    // Handle unary expressions (!)
+    if (condition.type === 'unary_expression') {
+      const operand = condition.namedChild(0);
+      const operator = condition.children.find(c => c.text === '!');
+      if (operator) {
+        return !this.evaluateCondition(operand);
+      }
+    }
+
+    // Handle identifiers (boolean variables)
+    if (condition.type === 'identifier') {
+      return Boolean(this.evaluateExpression(condition));
+    }
+
+    // Handle literals
+    if (condition.type === 'true' || condition.text === 'true') return true;
+    if (condition.type === 'false' || condition.text === 'false') return false;
+    if (condition.type === 'number_literal') {
+      return parseInt(condition.text) !== 0;
+    }
+
+    return false;
+  }
+
+  /**
+   * Evaluate condition from string using current runtime state
+   */
+  evaluateConditionFromState(conditionString) {
+    // Use synchronous runtimeVariables map (not React state) for reliable evaluation
+    const variables = this.runtimeVariables;
+
+    if (!variables || variables.size === 0) {
+      console.warn('⚠️ evaluateConditionFromState: No runtime variables available');
+      return false;
+    }
+
+    // Remove parentheses
+    conditionString = conditionString.replace(/[()]/g, '').trim();
+
+    // Parse binary comparison: x > y, score >= 90, etc.
+    const comparisonMatch = conditionString.match(/(\w+)\s*(>=|<=|>|<|==|!=)\s*(\w+)/);
+    if (comparisonMatch) {
+      const leftVar = comparisonMatch[1];
+      const operator = comparisonMatch[2];
+      const rightOperand = comparisonMatch[3];
+
+      // Get left value from runtime variables
+      const leftData = variables.get(leftVar);
+      const leftValue = leftData?.value;
+      if (leftValue === undefined) {
+        console.warn('⚠️ Variable not found in runtime state:', leftVar);
+        return false;
+      }
+
+      // Get right value (could be variable or literal)
+      const rightData = variables.get(rightOperand);
+      let rightValue = rightData?.value;
+      if (rightValue === undefined) {
+        // Try parsing as number
+        rightValue = parseInt(rightOperand);
+        if (isNaN(rightValue)) return false;
+      }
+
+      console.log('🎯 Condition eval:', leftValue, operator, rightValue, '→', (() => {
+        switch (operator) {
+          case '>': return leftValue > rightValue;
+          case '<': return leftValue < rightValue;
+          case '>=': return leftValue >= rightValue;
+          case '<=': return leftValue <= rightValue;
+          case '==': return leftValue == rightValue;
+          case '!=': return leftValue != rightValue;
+          default: return false;
+        }
+      })());
+
+      switch (operator) {
+        case '>': return leftValue > rightValue;
+        case '<': return leftValue < rightValue;
+        case '>=': return leftValue >= rightValue;
+        case '<=': return leftValue <= rightValue;
+        case '==': return leftValue == rightValue;
+        case '!=': return leftValue != rightValue;
+        default: return false;
+      }
+    }
+
+    console.warn('⚠️ Could not parse condition:', conditionString);
+    return false;
+  }
+
+  /**
    * Get function name from declarator
    */
   getFunctionName(declarator) {
@@ -525,10 +944,20 @@ class InterpreterService {
   getFullType(baseType, declarator) {
     if (!declarator) return baseType;
     
+    console.log('🔍 getFullType:', { baseType, declaratorType: declarator.type, declaratorText: declarator.text });
+    
     if (declarator.type === 'pointer_declarator') {
-      return baseType + '*';
+      // Recursively handle nested pointer declarators (int**, int***, etc.)
+      const innerDeclarator = declarator.namedChild(0);
+      console.log('🔍 Nested pointer declarator found, recursing with inner:', innerDeclarator?.type);
+      return this.getFullType(baseType + '*', innerDeclarator);
     }
     
+    if (declarator.type === 'array_declarator') {
+      return baseType; // Handle array separately
+    }
+    
+    console.log('🔍 Final type:', baseType);
     return baseType;
   }
 
@@ -589,7 +1018,14 @@ class InterpreterService {
         continue;
       }
       
-      // Pointer dereference like *ptr
+      // Double pointer dereference like **handle
+      const doubleDerefMatch = trimmed.match(/^\*\*(\w+)/);
+      if (doubleDerefMatch) {
+        output += `{**${doubleDerefMatch[1]}}`; // Placeholder to be replaced at runtime
+        continue;
+      }
+      
+      // Single pointer dereference like *ptr
       const derefMatch = trimmed.match(/^\*(\w+)/);
       if (derefMatch) {
         output += `{*${derefMatch[1]}}`; // Placeholder to be replaced at runtime
@@ -611,8 +1047,48 @@ class InterpreterService {
    * Execute steps with delay for visualization
    */
   async executeSteps(steps, onStep) {
+    console.log('🚀 InterpreterService v2.0 - Branch Skipping Active');
+    const skipBranches = new Map(); // Maps conditionalParent index to branch to skip
+    
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
+      
+      console.log(`Step ${i}:`, step.type, step.conditionalBranches ? `(branches: ${JSON.stringify(step.conditionalBranches)})` : '');
+      
+      // Check if this step should be skipped based on conditional branches
+      if (step.conditionalBranches && step.conditionalBranches.length > 0) {
+        const shouldSkipStep = step.conditionalBranches.some(({ branch, parent }) => {
+          return skipBranches.get(parent) === branch;
+        });
+        
+        if (shouldSkipStep) {
+          console.log(`  ✗ SKIPPING this step`);
+          continue; // Skip this step
+        } else {
+          console.log(`  ✓ EXECUTING this step`);
+        }
+      }
+      
+      // If this is an IF_STATEMENT, evaluate condition and decide which branch to skip
+      if (step.type === 'IF_STATEMENT') {
+        const conditionResult = this.evaluateConditionFromState(step.data.condition);
+        console.log('🎯 IF condition evaluated:', {
+          condition: step.data.condition,
+          result: conditionResult,
+          willSkip: conditionResult ? 'if-false' : 'if-true'
+        });
+        
+        // Store which branch to skip
+        if (conditionResult) {
+          // Condition is true, skip false branch
+          skipBranches.set(i, 'if-false');
+          console.log(`  → Setting skipBranches[${i}] = 'if-false'`);
+        } else {
+          // Condition is false, skip true branch
+          skipBranches.set(i, 'if-true');
+          console.log(`  → Setting skipBranches[${i}] = 'if-true'`);
+        }
+      }
       
       // Call the callback for highlighting/tracking
       if (onStep) {
@@ -648,6 +1124,13 @@ class InterpreterService {
           // This is a simplified approach - in reality we'd track addresses properly
         }
         
+        // Track variable synchronously for condition evaluation
+        this.runtimeVariables.set(step.data.name, {
+          value: finalValue,
+          type: step.data.type,
+          address: step.data.address
+        });
+        
         this.vizActions.setVariable(
           step.data.name,
           finalValue,
@@ -674,14 +1157,84 @@ class InterpreterService {
             : null;
           
           if (currentFrame && currentFrame.variables) {
-            // Replace {varName} with actual value
-            outputText = outputText.replace(/\{(\w+)\}/g, (match, varName) => {
-              const varData = currentFrame.variables[varName];
-              console.log('🔍 Replacing {' + varName + '}:', varData);
-              return varData ? String(varData.value) : match;
+            // IMPORTANT: Process in order of specificity (most specific first)
+            
+            // 1. Replace {**doublePtrName} with double dereferenced value
+            outputText = outputText.replace(/\{\*\*(\w+)\}/g, (match, ptrName) => {
+              const ptrData = currentFrame.variables[ptrName];
+              console.log('🔍 Double Deref - Looking for:', ptrName);
+              console.log('🔍 Double Deref - Found variable:', ptrData);
+              console.log('🔍 Double Deref - All variables:', currentFrame.variables);
+              
+              if (!ptrData) {
+                console.log('❌ Variable not found:', ptrName);
+                return match;
+              }
+              
+              if (!ptrData.type || !ptrData.type.includes('**')) {
+                console.log('❌ Variable is not a double pointer:', ptrData.type);
+                return match;
+              }
+              
+              // First level: pointer to pointer points to a variable
+              const valueStr = String(ptrData.value);
+              console.log('🔍 Double Deref - Value string:', valueStr);
+              
+              const varRefMatch = valueStr.match(/^&(\w+)$/);
+              if (!varRefMatch) {
+                console.log('❌ Value does not match &varName pattern:', valueStr);
+                return match;
+              }
+              
+              const intermediateVarName = varRefMatch[1];
+              const intermediateVar = currentFrame.variables[intermediateVarName];
+              console.log('🔍 Double Deref - Intermediate var name:', intermediateVarName);
+              console.log('🔍 Double Deref - Intermediate var data:', intermediateVar);
+              
+              if (!intermediateVar) {
+                console.log('❌ Intermediate variable not found:', intermediateVarName);
+                return match;
+              }
+              
+              if (!intermediateVar.type || !intermediateVar.type.includes('*')) {
+                console.log('❌ Intermediate variable is not a pointer:', intermediateVar.type);
+                return match;
+              }
+              
+              // Second level: intermediate pointer points to actual variable
+              const intermediateValueStr = String(intermediateVar.value);
+              console.log('🔍 Double Deref - Intermediate value:', intermediateValueStr);
+              
+              const varRefMatch2 = intermediateValueStr.match(/^&(\w+)$/);
+              if (varRefMatch2) {
+                const targetVarName = varRefMatch2[1];
+                const targetVar = currentFrame.variables[targetVarName];
+                console.log('🔍 Double Deref - Target var name:', targetVarName);
+                console.log('🔍 Double Deref - Target var data:', targetVar);
+                
+                if (targetVar) {
+                  console.log('✅ Double Deref SUCCESS! Returning:', targetVar.value);
+                  return String(targetVar.value);
+                }
+              }
+              
+              // Check if intermediate points to array element
+              const arrayMatch = intermediateValueStr.match(/^(.+)\[(\d+)\]$/);
+              if (arrayMatch) {
+                const arrayName = arrayMatch[1];
+                const index = parseInt(arrayMatch[2]);
+                const arrayVar = currentFrame.variables[arrayName];
+                if (arrayVar && Array.isArray(arrayVar.value) && arrayVar.value[index] !== undefined) {
+                  console.log('✅ Double Deref to array SUCCESS! Returning:', arrayVar.value[index]);
+                  return String(arrayVar.value[index]);
+                }
+              }
+              
+              console.log('❌ Could not resolve double dereference');
+              return match;
             });
             
-            // Replace {*ptrName} with dereferenced value
+            // 2. Replace {*ptrName} with dereferenced value
             outputText = outputText.replace(/\{\*(\w+)\}/g, (match, ptrName) => {
               const ptrData = currentFrame.variables[ptrName];
               console.log('🔍 Replacing {*' + ptrName + '}:', {
@@ -703,7 +1256,15 @@ class InterpreterService {
                     return String(arrayVar.value[index]);
                   }
                 } else {
-                  // Find the variable that this pointer points to
+                  // Check if pointing to variable: &varName
+                  const varRefMatch = String(ptrData.value).match(/^&(\w+)$/);
+                  if (varRefMatch) {
+                    const targetVarName = varRefMatch[1];
+                    const targetVar = currentFrame.variables[targetVarName];
+                    return targetVar ? String(targetVar.value) : match;
+                  }
+                  
+                  // Find the variable that this pointer points to by address
                   const targetVar = Object.values(currentFrame.variables).find(
                     v => v.address === ptrData.value
                   );
@@ -712,6 +1273,13 @@ class InterpreterService {
                 }
               }
               return match;
+            });
+            
+            // 3. Replace {varName} with actual value (plain variables)
+            outputText = outputText.replace(/\{(\w+)\}/g, (match, varName) => {
+              const varData = currentFrame.variables[varName];
+              console.log('🔍 Replacing {' + varName + '}:', varData);
+              return varData ? String(varData.value) : match;
             });
           }
           
@@ -723,11 +1291,9 @@ class InterpreterService {
       
       case 'UPDATE_VARIABLE':
         // Update pointer value (reassignment)
-        if (this.getState) {
-          const currentState = this.getState();
-          const currentFrame = currentState.stack[currentState.stack.length - 1];
-          
-          if (currentFrame && currentFrame.variables[step.data.name]) {
+        {
+          const varData = this.runtimeVariables.get(step.data.name);
+          if (varData) {
             let newValue = step.data.value;
             
             // Handle pointer arithmetic marker: __PTR_ARITH__pArr__+__2
@@ -737,7 +1303,7 @@ class InterpreterService {
               const op = parts[3];
               const offset = parseInt(parts[4]);
               
-              const ptrData = currentFrame.variables[ptrName];
+              const ptrData = this.runtimeVariables.get(ptrName);
               if (ptrData) {
                 const arrayMatch = String(ptrData.value).match(/^(.+)\[(\d+)\]$/);
                 if (arrayMatch) {
@@ -749,11 +1315,17 @@ class InterpreterService {
               }
             }
             
+            // Sync runtime state
+            this.runtimeVariables.set(step.data.name, {
+              ...varData,
+              value: newValue
+            });
+            
             this.vizActions.setVariable(
               step.data.name,
               newValue,
-              currentFrame.variables[step.data.name].type,
-              currentFrame.variables[step.data.name].address
+              varData.type,
+              varData.address
             );
           }
         }
@@ -761,22 +1333,26 @@ class InterpreterService {
       
       case 'POINTER_INCREMENT':
         // Handle pArr++ or pArr--
-        if (this.getState) {
-          const currentState = this.getState();
-          const currentFrame = currentState.stack[currentState.stack.length - 1];
-          
-          if (currentFrame && currentFrame.variables[step.data.name]) {
-            const ptrData = currentFrame.variables[step.data.name];
+        {
+          const ptrData = this.runtimeVariables.get(step.data.name);
+          if (ptrData) {
             const arrayMatch = String(ptrData.value).match(/^(.+)\[(\d+)\]$/);
             
             if (arrayMatch) {
               const arrayName = arrayMatch[1];
               const currentIndex = parseInt(arrayMatch[2]);
               const newIndex = currentIndex + step.data.delta;
+              const newValue = `${arrayName}[${newIndex}]`;
+              
+              // Sync runtime state
+              this.runtimeVariables.set(step.data.name, {
+                ...ptrData,
+                value: newValue
+              });
               
               this.vizActions.setVariable(
                 step.data.name,
-                `${arrayName}[${newIndex}]`,
+                newValue,
                 ptrData.type,
                 ptrData.address
               );
@@ -787,23 +1363,26 @@ class InterpreterService {
       
       case 'DEREF_ASSIGN':
         // Handle *pArr = 999 (modify array element through pointer)
-        if (this.getState) {
-          const currentState = this.getState();
-          const currentFrame = currentState.stack[currentState.stack.length - 1];
-          
-          if (currentFrame && currentFrame.variables[step.data.pointerName]) {
-            const ptrData = currentFrame.variables[step.data.pointerName];
+        {
+          const ptrData = this.runtimeVariables.get(step.data.pointerName);
+          if (ptrData) {
             const arrayMatch = String(ptrData.value).match(/^(.+)\[(\d+)\]$/);
             
             if (arrayMatch) {
               const arrayName = arrayMatch[1];
               const index = parseInt(arrayMatch[2]);
-              const arrayVar = currentFrame.variables[arrayName];
+              const arrayVar = this.runtimeVariables.get(arrayName);
               
               if (arrayVar && Array.isArray(arrayVar.value)) {
                 // Clone the array and modify it
                 const newArray = [...arrayVar.value];
                 newArray[index] = step.data.value;
+                
+                // Sync runtime state
+                this.runtimeVariables.set(arrayName, {
+                  ...arrayVar,
+                  value: newArray
+                });
                 
                 this.vizActions.setVariable(
                   arrayName,
@@ -812,12 +1391,18 @@ class InterpreterService {
                   arrayVar.address
                 );
               }
-            } else if (ptrData.value.startsWith('&')) {
+            } else if (String(ptrData.value).startsWith('&')) {
               // Pointer to regular variable: &y
-              const targetVarName = ptrData.value.substring(1);
-              const targetVar = currentFrame.variables[targetVarName];
+              const targetVarName = String(ptrData.value).substring(1);
+              const targetVar = this.runtimeVariables.get(targetVarName);
               
               if (targetVar) {
+                // Sync runtime state
+                this.runtimeVariables.set(targetVarName, {
+                  ...targetVar,
+                  value: step.data.value
+                });
+                
                 this.vizActions.setVariable(
                   targetVarName,
                   step.data.value,
@@ -828,6 +1413,28 @@ class InterpreterService {
             }
           }
         }
+        break;
+      
+      case 'IF_STATEMENT':
+        // Condition evaluation happens in the Editor execution loop
+        // This step just marks the if statement for visualization
+        break;
+      
+      case 'SWITCH_STATEMENT':
+        // Switch evaluation happens in the Editor execution loop
+        // This step just marks the switch statement for visualization
+        break;
+      
+      case 'EVALUATE_CONDITION':
+      case 'ENTER_BRANCH':
+      case 'EXIT_BRANCH':
+      case 'EVALUATE_SWITCH':
+      case 'ENTER_CASE':
+      case 'EVALUATE_LOOP_CONDITION':
+      case 'ENTER_LOOP':
+      case 'EXIT_LOOP_ITERATION':
+        // Control flow steps - just for visualization/tracking
+        // No state changes needed, these are for debugging/visualization
         break;
       
       case 'RETURN':

@@ -6,6 +6,7 @@ import { useVisualization } from '../context/VisualizationContext';
 import MemoryVisualization from '../components/MemoryVisualization';
 import ControlPanel from '../components/ControlPanel';
 import ConsoleOutput from '../components/ConsoleOutput';
+import CodeSnippets from '../components/CodeSnippets';
 
 const Editor = () => {
   const { state: vizState, actions: vizActions, getState } = useVisualization();
@@ -14,11 +15,11 @@ const Editor = () => {
 using namespace std;
 
 int main() {
-    int arr[5] = {10, 20, 30, 40, 50};
-    int* pArr = &arr[2];
-    int** handle = &pArr;
+    int x = 42;
+    int* ptr = &x;
+    int** handle = &ptr;
     
-    cout << "Value at pArr: " << *pArr << endl;
+    cout << "Value: " << **handle << endl;
     
     return 0;
 }`);
@@ -30,6 +31,7 @@ int main() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [aiTutorOpen, setAiTutorOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const editorRef = useRef(null);
   const decorationsRef = useRef([]);
 
@@ -83,6 +85,7 @@ int main() {
 
   const stepsRef = useRef([]);
   const executionControlRef = useRef({ shouldStop: false, isPaused: false });
+  const skipBranchesRef = useRef(new Map());
 
   const executeStepsWithVisualization = async (steps) => {
     if (!interpreterRef.current) return;
@@ -96,6 +99,56 @@ int main() {
     vizActions.reset();
     vizActions.setStatus('RUNNING');
     setCurrentStep(0);
+
+    // Reset interpreter runtime state
+    if (interpreterRef.current) {
+      interpreterRef.current.runtimeVariables = new Map();
+    }
+
+    // Branch skipping: Maps parent step index -> Set of branch names to skip
+    const skipBranches = new Map();
+
+    // Helper: should this step be skipped?
+    const shouldSkipStep = (step) => {
+      if (!step.conditionalBranches || step.conditionalBranches.length === 0) return false;
+      return step.conditionalBranches.some(({ branch, parent }) => {
+        const skipSet = skipBranches.get(parent);
+        return skipSet && skipSet.has(branch);
+      });
+    };
+
+    // Helper: evaluate control flow and set skip branches
+    const evaluateControlFlow = (step, stepIndex) => {
+      if (step.type === 'IF_STATEMENT') {
+        const condResult = interpreterRef.current.evaluateConditionFromState(step.data.condition);
+        const toSkip = new Set();
+        toSkip.add(condResult ? 'if-false' : 'if-true');
+        skipBranches.set(stepIndex, toSkip);
+      } else if (step.type === 'SWITCH_STATEMENT') {
+        const varData = interpreterRef.current.runtimeVariables.get(step.data.variable);
+        const switchValue = varData?.value;
+        // Collect all case branches from upcoming steps
+        const toSkip = new Set();
+        for (let j = stepIndex + 1; j < steps.length; j++) {
+          const futureStep = steps[j];
+          if (!futureStep.conditionalBranches) continue;
+          for (const cb of futureStep.conditionalBranches) {
+            if (cb.parent === stepIndex && cb.branch.startsWith('case-')) {
+              toSkip.add(cb.branch);
+            }
+          }
+        }
+        // Remove the matching case from skip set
+        const matchKey = `case-${switchValue}`;
+        if (toSkip.has(matchKey)) {
+          toSkip.delete(matchKey);
+        } else {
+          // No matching case - keep default, skip all numbered cases
+          toSkip.delete('case-default');
+        }
+        skipBranches.set(stepIndex, toSkip);
+      }
+    };
 
     // Stop before the last step (POP_FRAME) to keep stack visible
     const lastStepToExecute = steps.length - 1;
@@ -116,6 +169,12 @@ int main() {
       }
 
       const step = steps[i];
+
+      // Skip steps belonging to untaken branches (supports nested if/else and switch)
+      if (shouldSkipStep(step)) continue;
+
+      // Evaluate control flow at runtime
+      evaluateControlFlow(step, i);
 
       // Highlight the line
       highlightLine(step.line);
@@ -153,6 +212,10 @@ int main() {
   const handleStop = () => {
     executionControlRef.current.shouldStop = true;
     executionControlRef.current.isPaused = false;
+    skipBranchesRef.current = new Map();
+    if (interpreterRef.current) {
+      interpreterRef.current.runtimeVariables = new Map();
+    }
     setIsPlaying(false);
     setIsPaused(false);
     highlightLine(0);
@@ -169,6 +232,7 @@ int main() {
         const steps = interpreterRef.current.generateSteps(tree);
         stepsRef.current = steps;
         setTotalSteps(steps.length);
+        skipBranchesRef.current = new Map();
         vizActions.reset();
         vizActions.setStatus('RUNNING');
       } catch (error) {
@@ -181,12 +245,41 @@ int main() {
     if (currentStep === 0) {
       vizActions.reset();
       vizActions.setStatus('RUNNING');
+      skipBranchesRef.current = new Map();
+      interpreterRef.current.runtimeVariables = new Map();
     }
 
-    const nextStep = currentStep;
+    let nextStep = currentStep;
+    if (nextStep >= stepsRef.current.length) return;
+
+    // Skip steps that belong to untaken branches (supports nested if/else)
+    while (nextStep < stepsRef.current.length) {
+      const step = stepsRef.current[nextStep];
+      if (step.conditionalBranches && step.conditionalBranches.length > 0) {
+        const shouldSkip = step.conditionalBranches.some(({ branch, parent }) => {
+          return skipBranchesRef.current.get(parent) === branch;
+        });
+        if (shouldSkip) {
+          nextStep++;
+          continue;
+        }
+      }
+      break;
+    }
+
     if (nextStep >= stepsRef.current.length) return;
 
     const step = stepsRef.current[nextStep];
+
+    // Evaluate condition for IF_STATEMENT
+    if (step.type === 'IF_STATEMENT') {
+      const condResult = interpreterRef.current.evaluateConditionFromState(step.data.condition);
+      if (condResult) {
+        skipBranchesRef.current.set(nextStep, 'if-false');
+      } else {
+        skipBranchesRef.current.set(nextStep, 'if-true');
+      }
+    }
 
     highlightLine(step.line);
     setCurrentStep(nextStep + 1);
@@ -218,12 +311,55 @@ int main() {
     // Reset and replay up to previous step
     const targetStep = currentStep - 1;
     vizActions.reset();
+    skipBranchesRef.current = new Map();
+    if (interpreterRef.current) {
+      interpreterRef.current.runtimeVariables = new Map();
+    }
 
     if (targetStep > 0) {
       vizActions.setStatus('RUNNING');
-      // Re-execute steps up to target
+      // Re-execute steps up to target, respecting branches
       for (let i = 0; i < targetStep; i++) {
-        await interpreterRef.current.executeStep(stepsRef.current[i]);
+        const step = stepsRef.current[i];
+
+        // Skip steps belonging to untaken branches (supports nested if/else)
+        if (step.conditionalBranches && step.conditionalBranches.length > 0) {
+          const shouldSkip = step.conditionalBranches.some(({ branch, parent }) => {
+            const skipSet = skipBranchesRef.current.get(parent);
+            return skipSet && skipSet.has(branch);
+          });
+          if (shouldSkip) continue;
+        }
+
+        // Evaluate control flow at runtime
+        if (step.type === 'IF_STATEMENT') {
+          const condResult = interpreterRef.current.evaluateConditionFromState(step.data.condition);
+          const toSkip = new Set();
+          toSkip.add(condResult ? 'if-false' : 'if-true');
+          skipBranchesRef.current.set(i, toSkip);
+        } else if (step.type === 'SWITCH_STATEMENT') {
+          const varData = interpreterRef.current.runtimeVariables.get(step.data.variable);
+          const switchValue = varData?.value;
+          const toSkip = new Set();
+          for (let j = i + 1; j < targetStep; j++) {
+            const fs = stepsRef.current[j];
+            if (!fs.conditionalBranches) continue;
+            for (const cb of fs.conditionalBranches) {
+              if (cb.parent === i && cb.branch.startsWith('case-')) {
+                toSkip.add(cb.branch);
+              }
+            }
+          }
+          const matchKey = `case-${switchValue}`;
+          if (toSkip.has(matchKey)) {
+            toSkip.delete(matchKey);
+          } else {
+            toSkip.delete('case-default');
+          }
+          skipBranchesRef.current.set(i, toSkip);
+        }
+
+        await interpreterRef.current.executeStep(step);
       }
       setCurrentStep(targetStep);
       highlightLine(stepsRef.current[targetStep - 1].line);
@@ -291,6 +427,15 @@ int main() {
     setCode(value || '');
   };
 
+  const handleSnippetSelect = (snippetCode) => {
+    setCode(snippetCode);
+    // Reset visualization
+    vizActions.reset();
+    setCurrentStep(0);
+    stepsRef.current = [];
+    highlightLine(0);
+  };
+
   const _handleParseClick = () => {
     parseCurrentCode();
   };
@@ -321,10 +466,17 @@ int main() {
         )}
       </div>
 
-      {/* Main Content - 40/60 Split */}
+      {/* Main Content - Sidebar + Editor + Visualization */}
       <div className="flex h-screen">
-        {/* Left Side - Editor + Console (40%) */}
-        <div className="w-[40%] flex flex-col border-r border-gray-800">
+        {/* Code Snippets Sidebar */}
+        <CodeSnippets 
+          onSelectSnippet={handleSnippetSelect}
+          isOpen={sidebarOpen}
+          onToggle={() => setSidebarOpen(!sidebarOpen)}
+        />
+        
+        {/* Middle - Editor + Console */}
+        <div className="flex-[2] flex flex-col border-r border-gray-800 min-w-0">
           {/* Editor Header */}
           <div className="bg-[#161b22] px-2 py-1.5 border-b border-[#30363d] flex items-center justify-between">
             <div className="flex items-center gap-2">
@@ -369,8 +521,8 @@ int main() {
           <ConsoleOutput output={vizState.output} />
         </div>
 
-        {/* Visualization Stage - 60% */}
-        <div className="w-[60%] flex flex-col">
+        {/* Right Side - Visualization Stage */}
+        <div className="flex-[3] flex flex-col">
           <MemoryVisualization vizState={vizState} />
           <ControlPanel
             currentStep={currentStep}
