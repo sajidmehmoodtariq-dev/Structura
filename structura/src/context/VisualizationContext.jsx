@@ -17,6 +17,7 @@ const ACTIONS = {
   POP_FRAME: 'POP_FRAME',
   SET_VARIABLE: 'SET_VARIABLE',
   ALLOCATE_HEAP: 'ALLOCATE_HEAP',
+  UPDATE_HEAP: 'UPDATE_HEAP', // NEW
   FREE_HEAP: 'FREE_HEAP',
   ADD_OUTPUT: 'ADD_OUTPUT',
   SET_LINE: 'SET_LINE',
@@ -33,10 +34,10 @@ function visualizationReducer(state, action) {
     case ACTIONS.PUSH_FRAME:
       return {
         ...state,
-        stack: [...state.stack, { 
-          id: Date.now(), 
-          name: action.payload.name, 
-          variables: {} 
+        stack: [...state.stack, {
+          id: Date.now(),
+          name: action.payload.name,
+          variables: {}
         }]
       };
 
@@ -51,7 +52,7 @@ function visualizationReducer(state, action) {
       // Update variable in the top-most stack frame
       const currentStack = [...state.stack];
       const topFrameForVar = currentStack[currentStack.length - 1];
-      
+
       if (!topFrameForVar) return state; // Safety check
 
       topFrameForVar.variables = {
@@ -72,6 +73,30 @@ function visualizationReducer(state, action) {
         heap: {
           ...state.heap,
           [address]: value
+        }
+      };
+    }
+
+    case ACTIONS.UPDATE_HEAP: {
+      const { address, value } = action.payload;
+      const existing = state.heap[address] || {};
+
+      let newValue = value;
+      // If updating a struct field, value might be { next: ... }
+      // Merge with existing struct data if both are objects
+      if (typeof existing.value === 'object' && existing.value !== null &&
+        typeof value === 'object' && value !== null) {
+        newValue = { ...existing.value, ...value };
+      }
+
+      return {
+        ...state,
+        heap: {
+          ...state.heap,
+          [address]: {
+            ...existing,
+            value: newValue
+          }
         }
       };
     }
@@ -121,42 +146,45 @@ const VisualizationContext = createContext();
 // Provider Component
 export function VisualizationProvider({ children }) {
   const [state, dispatch] = useReducer(visualizationReducer, initialState);
-  
+
   // Use ref to always have access to latest state
   const stateRef = useRef(state);
-  
+
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
 
   // Action Creators
   const reset = useCallback(() => dispatch({ type: ACTIONS.RESET }), []);
-  
-  const pushFrame = useCallback((name) => 
+
+  const pushFrame = useCallback((name) =>
     dispatch({ type: ACTIONS.PUSH_FRAME, payload: { name } }), []);
-  
-  const popFrame = useCallback(() => 
+
+  const popFrame = useCallback(() =>
     dispatch({ type: ACTIONS.POP_FRAME }), []);
-  
-  const setVariable = useCallback((name, value, type, address = null) => 
+
+  const setVariable = useCallback((name, value, type, address = null) =>
     dispatch({ type: ACTIONS.SET_VARIABLE, payload: { name, value, type, address } }), []);
-  
-  const allocateHeap = useCallback((address, value) => 
+
+  const allocateHeap = useCallback((address, value) =>
     dispatch({ type: ACTIONS.ALLOCATE_HEAP, payload: { address, value } }), []);
-    
-  const freeHeap = useCallback((address) => 
+
+  const updateHeap = useCallback((address, value) =>
+    dispatch({ type: ACTIONS.UPDATE_HEAP, payload: { address, value } }), []);
+
+  const freeHeap = useCallback((address) =>
     dispatch({ type: ACTIONS.FREE_HEAP, payload: { address } }), []);
-    
-  const logOutput = useCallback((text) => 
+
+  const logOutput = useCallback((text) =>
     dispatch({ type: ACTIONS.ADD_OUTPUT, payload: text }), []);
-    
-  const setLine = useCallback((line) => 
+
+  const setLine = useCallback((line) =>
     dispatch({ type: ACTIONS.SET_LINE, payload: line }), []);
-    
-  const setStatus = useCallback((status) => 
+
+  const setStatus = useCallback((status) =>
     dispatch({ type: ACTIONS.SET_STATUS, payload: status }), []);
 
-  const setError = useCallback((error) => 
+  const setError = useCallback((error) =>
     dispatch({ type: ACTIONS.SET_ERROR, payload: error }), []);
 
   // Add getState function to access current state
@@ -171,6 +199,7 @@ export function VisualizationProvider({ children }) {
       popFrame,
       setVariable,
       allocateHeap,
+      updateHeap,
       freeHeap,
       logOutput,
       setLine,

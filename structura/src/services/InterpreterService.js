@@ -230,8 +230,65 @@ class InterpreterService {
             valueText: value.text
           });
 
+          // Handle new expression: int* ptr = new int(42);
+          if (value.type === 'new_expression') {
+            const typeNode = value.childForFieldName('type');
+            const argsNode = value.childForFieldName('arguments'); // argument_list
+
+            const allocType = typeNode ? typeNode.text : 'unknown';
+            let initialValue = 0; // Default for int/primitives
+
+            // Generate a random-looking heap address
+            // Use 0x5... range for Heap to distinguish from Stack (0x7...)
+            const heapAddress = `0x5F${Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0')}`;
+
+            // Helper to get value from argument list
+            if (argsNode && argsNode.namedChildCount > 0) {
+              const arg = argsNode.namedChild(0);
+              console.log('🔍 Analyzing new arguments:', {
+                argsNodeText: argsNode.text,
+                argType: arg?.type,
+                argText: arg?.text
+              });
+
+              const val = this.evaluateExpression(arg);
+              // Only update if evaluation succeeded (evaluateExpression returns 'undefined' string on failure)
+              if (val !== 'undefined' && val !== undefined) {
+                initialValue = val;
+              } else {
+                console.warn('⚠️ Argument evaluation returned undefined:', val);
+              }
+            }
+
+            // Check if it's a struct (like Node)
+            // This is a simple mock - in a real interpreter we'd look up the struct definition
+            if (allocType === 'Node') {
+              initialValue = { data: 0, next: 'nullptr' };
+              // If args provided: new Node(10) - assuming constructor sets data
+              if (argsNode && argsNode.namedChildCount > 0) {
+                const val = this.evaluateExpression(argsNode.namedChild(0));
+                initialValue.data = val;
+              }
+            }
+
+            // Step 1: Allocate on Heap
+            this.executionSteps.push({
+              type: 'ALLOCATE_HEAP',
+              line: node.startPosition.row + 1,
+              data: {
+                address: heapAddress,
+                value: initialValue,
+                type: allocType
+              }
+            });
+
+            // Step 2: Assign heap address to pointer variable
+            varValue = heapAddress;
+            console.log('✨ New Allocation:', { varName, heapAddress, initialValue });
+
+          }
           // Check if pointing to array element: &arr[2]
-          if (value.type === 'pointer_expression') {
+          else if (value.type === 'pointer_expression') {
             const targetExpr = value.namedChild(0);
             console.log('🔍 Target expression:', {
               type: targetExpr?.type,
@@ -402,6 +459,34 @@ class InterpreterService {
         }
       });
       return;
+    }
+
+    // Case 3: Field assignment (node->next = node2)
+    if (left.type === 'field_expression') {
+      const objectArg = left.childForFieldName('argument');
+      const fieldArg = left.childForFieldName('field');
+
+      if (objectArg && fieldArg) {
+        const ptrName = objectArg.text;
+        const fieldName = fieldArg.text;
+
+        // Evaluate right side (could be number, identifier, new expr?)
+        // For node->next = node2, evaluateExpression(node2) -> address
+        const rhsValue = this.evaluateExpression(right);
+
+        console.log('🔄 Field Assignment:', { ptrName, fieldName, rhsValue });
+
+        this.executionSteps.push({
+          type: 'SET_HEAP_FIELD',
+          line: line,
+          data: {
+            pointerName: ptrName,
+            field: fieldName,
+            value: rhsValue
+          }
+        });
+        return;
+      }
     }
 
     // Case 2: Regular pointer reassignment: ptr = &y, ptr = arr, pArr = pArr + 2
@@ -1029,6 +1114,9 @@ class InterpreterService {
     if (!node) return 'undefined';
 
     switch (node.type) {
+      case 'parenthesized_expression':
+        return this.evaluateExpression(node.namedChild(0), useAnalysisState);
+
       case 'number_literal':
         return parseInt(node.text);
 
@@ -1270,17 +1358,12 @@ class InterpreterService {
               const intermediateValueStr = String(intermediateVar.value);
               console.log('🔍 Double Deref - Intermediate value:', intermediateValueStr);
 
-              const varRefMatch2 = intermediateValueStr.match(/^&(\w+)$/);
-              if (varRefMatch2) {
-                const targetVarName = varRefMatch2[1];
-                const targetVar = currentFrame.variables[targetVarName];
-                console.log('🔍 Double Deref - Target var name:', targetVarName);
-                console.log('🔍 Double Deref - Target var data:', targetVar);
-
-                if (targetVar) {
-                  console.log('✅ Double Deref SUCCESS! Returning:', targetVar.value);
-                  return String(targetVar.value);
-                }
+              // 2. Check Heap
+              if (currentState.heap && currentState.heap[intermediateVar.value]) {
+                const heapObj = currentState.heap[intermediateVar.value];
+                // return value, or if object/struct, maybe format it? 
+                // For now, assume primitive or simple value
+                return String(heapObj.value);
               }
 
               // Check if intermediate points to array element
@@ -1330,11 +1413,25 @@ class InterpreterService {
                   }
 
                   // Find the variable that this pointer points to by address
-                  const targetVar = Object.values(currentFrame.variables).find(
+                  // 1. Check Stack
+                  let targetVar = Object.values(currentFrame.variables).find(
                     v => v.address === ptrData.value
                   );
+
+                  if (targetVar) {
+                    return String(targetVar.value);
+                  }
+
+                  // 2. Check Heap
+                  if (currentState.heap && currentState.heap[ptrData.value]) {
+                    const heapObj = currentState.heap[ptrData.value];
+                    // return value, or if object/struct, maybe format it? 
+                    // For now, assume primitive or simple value
+                    return String(heapObj.value);
+                  }
+
                   console.log('🔍 Found target variable:', targetVar);
-                  return targetVar ? String(targetVar.value) : match;
+                  return match;
                 }
               }
               return match;
@@ -1415,6 +1512,13 @@ class InterpreterService {
             );
           }
         }
+        break;
+
+      case 'ALLOCATE_HEAP':
+        this.vizActions.allocateHeap(step.data.address, {
+          value: step.data.value,
+          type: step.data.type
+        });
         break;
 
       case 'POINTER_INCREMENT':
@@ -1516,7 +1620,50 @@ class InterpreterService {
                   targetVar.address
                 );
               }
+            } else if (String(ptrData.value).startsWith('0x')) {
+              // Heap address: 0x5F...
+              // Call updateHeap action
+              if (this.vizActions.updateHeap) {
+                this.vizActions.updateHeap(ptrData.value, step.data.value);
+              } else {
+                console.warn('⚠️ vizActions.updateHeap not implemented');
+              }
             }
+          }
+        }
+        break;
+
+      case 'SET_HEAP_FIELD':
+        {
+          const ptrData = this.runtimeVariables.get(step.data.pointerName);
+          let valueToSet = step.data.value;
+
+          // Resolve variable value at runtime if possible
+          if (typeof valueToSet === 'string' && this.runtimeVariables.has(valueToSet)) {
+            const sourceVar = this.runtimeVariables.get(valueToSet);
+            if (sourceVar) {
+              valueToSet = sourceVar.value;
+            }
+          }
+
+          console.log('⚙️ Executing SET_HEAP_FIELD', {
+            pointerName: step.data.pointerName,
+            field: step.data.field,
+            value: step.data.value,
+            resolvedValue: valueToSet,
+            ptrData
+          });
+
+          if (ptrData && ptrData.value) {
+            // ptrData.value should be the heap address (0x...)
+            // Construct partial update object
+            const update = { [step.data.field]: valueToSet };
+
+            if (this.vizActions.updateHeap) {
+              this.vizActions.updateHeap(ptrData.value, update);
+            }
+          } else {
+            console.warn('⚠️ Could not resolve pointer for field update:', step.data.pointerName);
           }
         }
         break;
