@@ -13,6 +13,7 @@ class InterpreterService {
     this.memoryAddressCounter = 0x7FFE1A00; // Mock stack addresses
     this.variableAddresses = new Map(); // Track variable name -> address mapping
     this.runtimeVariables = new Map(); // Synchronous runtime state for condition evaluation
+    this.analysisVariables = new Map(); // Track variable values during analysis phase (for loop conditions)
   }
 
   /**
@@ -30,17 +31,17 @@ class InterpreterService {
     this.tree = tree;
     this.memoryAddressCounter = 0x7FFE1A00;
     this.executionSteps = [];
-    
+
     // Reset visualization state
     this.vizActions.reset();
     this.vizActions.setStatus('RUNNING');
 
     // Start walking the AST
     await this.walkNode(tree.rootNode);
-    
+
     // Execution complete
     this.vizActions.setStatus('COMPLETED');
-    
+
     return this.executionSteps;
   }
 
@@ -54,9 +55,9 @@ class InterpreterService {
     this.executionSteps = [];
     this.runtimeVariables = new Map();
     this.variableAddresses.clear();
-    
+
     this.analyzeNode(tree.rootNode);
-    
+
     return this.executionSteps;
   }
 
@@ -94,7 +95,7 @@ class InterpreterService {
     const declarator = node.childForFieldName('declarator');
     const functionName = this.getFunctionName(declarator);
     const body = node.childForFieldName('body');
-    
+
     if (!body) return;
 
     // Step: Enter function
@@ -172,28 +173,28 @@ class InterpreterService {
   analyzeDeclaration(node) {
     const typeNode = node.childForFieldName('type');
     const type = typeNode ? typeNode.text : 'unknown';
-    
+
     // Get all declarators (can be multiple: int x, y;)
     for (let i = 0; i < node.namedChildCount; i++) {
       const child = node.namedChild(i);
-      
+
       if (child.type === 'init_declarator') {
         const declarator = child.childForFieldName('declarator');
         const value = child.childForFieldName('value');
-        
+
         const varName = this.getVariableName(declarator);
         const varType = this.getFullType(type, declarator);
         let varValue = value ? this.evaluateExpression(value) : 'undefined';
         const address = this.generateAddress();
-        
+
         // Check if this is an array declaration
         const isArray = declarator && declarator.type === 'array_declarator';
-        
+
         if (isArray) {
           // Handle array declaration
           const sizeNode = declarator.childForFieldName('size');
           const arraySize = sizeNode ? parseInt(sizeNode.text) : 0;
-          
+
           // Check if there's an initializer list
           if (value && value.type === 'initializer_list') {
             const values = [];
@@ -206,10 +207,10 @@ class InterpreterService {
             // Create default array
             varValue = Array(arraySize).fill(0);
           }
-          
+
           // Store array base address
           this.variableAddresses.set(varName, address);
-          
+
           this.executionSteps.push({
             type: 'SET_VARIABLE',
             line: node.startPosition.row + 1,
@@ -228,7 +229,7 @@ class InterpreterService {
             valueType: value.type,
             valueText: value.text
           });
-          
+
           // Check if pointing to array element: &arr[2]
           if (value.type === 'pointer_expression') {
             const targetExpr = value.namedChild(0);
@@ -236,14 +237,14 @@ class InterpreterService {
               type: targetExpr?.type,
               text: targetExpr?.text
             });
-            
+
             if (targetExpr && targetExpr.type === 'subscript_expression') {
               // Pointing to array element: int* ptr = &arr[2];
               // subscript_expression has children: argument[index]
               // Try field names first, then fall back to child indices
               let arrayName = targetExpr.childForFieldName('argument')?.text;
               let indexNode = targetExpr.childForFieldName('index');
-              
+
               // Fallback: first named child is array name, second is index
               if (!arrayName && targetExpr.namedChildCount >= 1) {
                 arrayName = targetExpr.namedChild(0)?.text;
@@ -251,7 +252,7 @@ class InterpreterService {
               if (!indexNode && targetExpr.namedChildCount >= 2) {
                 indexNode = targetExpr.namedChild(1);
               }
-              
+
               // Parse index directly from the subscript expression text: arr[2] -> extract 2
               let index = 0;
               const subscriptText = targetExpr.text; // e.g., "arr[2]"
@@ -265,7 +266,7 @@ class InterpreterService {
                   index = parseInt(indexNode.text, 10) || this.evaluateExpression(indexNode);
                 }
               }
-              
+
               console.log('🎯 Subscript parsing:', {
                 fullText: subscriptText,
                 arrayName,
@@ -273,7 +274,7 @@ class InterpreterService {
                 indexNodeType: indexNode?.type,
                 indexNodeText: indexNode?.text
               });
-              
+
               if (arrayName) {
                 varValue = `${arrayName}[${index}]`;
               }
@@ -298,10 +299,10 @@ class InterpreterService {
             varValue = `${arrayName}[0]`;
             console.log('🎯 Array decay to pointer:', arrayName);
           }
-          
+
           // Store the address for this pointer variable
           this.variableAddresses.set(varName, address);
-          
+
           this.executionSteps.push({
             type: 'SET_VARIABLE',
             line: node.startPosition.row + 1,
@@ -314,10 +315,10 @@ class InterpreterService {
           });
         } else {
           // Regular variable
-          
+
           // Store the address for this variable
           this.variableAddresses.set(varName, address);
-          
+
           this.executionSteps.push({
             type: 'SET_VARIABLE',
             line: node.startPosition.row + 1,
@@ -328,6 +329,11 @@ class InterpreterService {
               address: address
             }
           });
+
+          // Track variable value during analysis phase for loop condition evaluation
+          if (typeof varValue === 'number') {
+            this.analysisVariables.set(varName, varValue);
+          }
         }
       }
     }
@@ -338,32 +344,32 @@ class InterpreterService {
    */
   analyzeExpressionStatement(node) {
     const text = node.text;
-    
+
     // Check if it's a cout statement
     if (text.includes('cout')) {
       const output = this.extractCoutOutput(node);
-      
+
       this.executionSteps.push({
         type: 'LOG_OUTPUT',
         line: node.startPosition.row + 1,
-        data: { 
+        data: {
           text: output,
           needsFrameContext: output.includes('{')
         }
       });
       return;
     }
-    
+
     // Get the expression child
     const expr = node.namedChild(0);
     if (!expr) return;
-    
+
     // Handle assignment expressions: ptr = &y, pArr = pArr + 2
     if (expr.type === 'assignment_expression') {
       this.analyzeAssignment(expr, node.startPosition.row + 1);
       return;
     }
-    
+
     // Handle update expressions: pArr++, pArr--
     if (expr.type === 'update_expression') {
       this.analyzeUpdateExpression(expr, node.startPosition.row + 1);
@@ -377,16 +383,16 @@ class InterpreterService {
   analyzeAssignment(expr, line) {
     const left = expr.childForFieldName('left');
     const right = expr.childForFieldName('right');
-    
+
     if (!left || !right) return;
-    
+
     console.log('🔄 Assignment:', { left: left.text, right: right.text, leftType: left.type });
-    
+
     // Case 1: Pointer dereference assignment: *pArr = 999
     if (left.type === 'pointer_expression' && left.text.startsWith('*')) {
       const ptrName = left.namedChild(0)?.text;
       const newValue = this.evaluateExpression(right);
-      
+
       this.executionSteps.push({
         type: 'DEREF_ASSIGN',
         line: line,
@@ -397,16 +403,16 @@ class InterpreterService {
       });
       return;
     }
-    
+
     // Case 2: Regular pointer reassignment: ptr = &y, ptr = arr, pArr = pArr + 2
     if (left.type === 'identifier') {
       const varName = left.text;
       let newValue = null;
-      
+
       // &variable - pointer to variable
       if (right.type === 'pointer_expression' && right.text.startsWith('&')) {
         const targetExpr = right.namedChild(0);
-        
+
         if (targetExpr?.type === 'subscript_expression') {
           // &arr[2]
           const subscriptText = targetExpr.text;
@@ -419,16 +425,54 @@ class InterpreterService {
           newValue = `&${targetExpr.text}`;
         }
       }
+      // literal assignment: result = 10
+      else if (right.type === 'number_literal') {
+        newValue = parseInt(right.text);
+
+        // Update analysis tracking
+        if (this.analysisVariables.has(varName)) {
+          this.analysisVariables.set(varName, newValue);
+        }
+      }
       // array name - decays to pointer to first element
       else if (right.type === 'identifier') {
         // Check if it's an array by tracking (simplified - assume array if assigning to pointer)
         newValue = `${right.text}[0]`;
       }
-      // pointer arithmetic: pArr + 2
+      // binary expression: x = x + 5 or ptr = p + 1
       else if (right.type === 'binary_expression') {
-        newValue = this.evaluatePointerArithmetic(right);
+        // Check if we are tracking this as a simple integer variable
+        if (this.analysisVariables.has(varName)) {
+          const leftOperand = right.childForFieldName('left');
+          const rightOperand = right.childForFieldName('right');
+          const op = right.children.find(c => ['+', '-', '*', '/'].includes(c.text))?.text;
+
+          if (leftOperand && rightOperand && op) {
+            const currentVal = this.evaluateExpression(leftOperand, true); // Get current analysis value
+            const delta = this.evaluateExpression(rightOperand, true);
+
+            if (typeof currentVal === 'number' && typeof delta === 'number') {
+              switch (op) {
+                case '+': newValue = currentVal + delta; break;
+                case '-': newValue = currentVal - delta; break;
+                case '*': newValue = currentVal * delta; break;
+                case '/': newValue = Math.floor(currentVal / delta); break;
+              }
+
+              // Update analysis state
+              this.analysisVariables.set(varName, newValue);
+              console.log(`📝 Arithmetic Update: ${varName} = ${newValue}`);
+            } else {
+              // Fallback if we can't evaluate numbers types
+              newValue = this.evaluatePointerArithmetic(right);
+            }
+          }
+        } else {
+          // Not tracked as integer, assume pointer arithmetic
+          newValue = this.evaluatePointerArithmetic(right);
+        }
       }
-      
+
       if (newValue !== null) {
         this.executionSteps.push({
           type: 'UPDATE_VARIABLE',
@@ -448,10 +492,10 @@ class InterpreterService {
   analyzeUpdateExpression(expr, line) {
     const operand = expr.namedChild(0);
     const operator = expr.text.includes('++') ? 1 : -1;
-    
+
     if (operand?.type === 'identifier') {
       const varName = operand.text;
-      
+
       this.executionSteps.push({
         type: 'POINTER_INCREMENT',
         line: line,
@@ -460,6 +504,14 @@ class InterpreterService {
           delta: operator
         }
       });
+
+      // Update analysis-time tracking for loop condition evaluation
+      if (this.analysisVariables.has(varName)) {
+        const currentValue = this.analysisVariables.get(varName);
+        if (typeof currentValue === 'number') {
+          this.analysisVariables.set(varName, currentValue + operator);
+        }
+      }
     }
   }
 
@@ -470,16 +522,16 @@ class InterpreterService {
     const left = expr.childForFieldName('left');
     const right = expr.childForFieldName('right');
     const operator = expr.children.find(c => c.type === '+' || c.type === '-' || c.text === '+' || c.text === '-');
-    
+
     if (left?.type === 'identifier' && right?.type === 'number_literal') {
       const ptrName = left.text;
       const offset = parseInt(right.text);
       const op = operator?.text || '+';
-      
+
       // Return a special marker that will be resolved at runtime
       return `__PTR_ARITH__${ptrName}__${op}__${offset}`;
     }
-    
+
     return null;
   }
 
@@ -519,7 +571,7 @@ class InterpreterService {
       const trueBranchStart = this.executionSteps.length;
       this.analyzeCompoundOrStatement(consequence);
       const trueBranchEnd = this.executionSteps.length;
-      
+
       // Mark all steps in true branch (push to array so nested ifs don't overwrite)
       for (let i = trueBranchStart; i < trueBranchEnd; i++) {
         if (!this.executionSteps[i].conditionalBranches) {
@@ -537,7 +589,7 @@ class InterpreterService {
       const falseBranchStart = this.executionSteps.length;
       this.analyzeCompoundOrStatement(alternative);
       const falseBranchEnd = this.executionSteps.length;
-      
+
       // Mark all steps in false branch (push to array so nested ifs don't overwrite)
       for (let i = falseBranchStart; i < falseBranchEnd; i++) {
         if (!this.executionSteps[i].conditionalBranches) {
@@ -659,13 +711,13 @@ class InterpreterService {
   analyzeWhileStatement(node) {
     const condition = node.childForFieldName('condition');
     const body = node.childForFieldName('body');
-    
+
     // For visualization, we'll show loop entry and limit iterations
     const MAX_ITERATIONS = 10;
-    
+
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
       const conditionResult = this.evaluateCondition(condition);
-      
+
       this.executionSteps.push({
         type: 'EVALUATE_LOOP_CONDITION',
         line: node.startPosition.row + 1,
@@ -711,11 +763,11 @@ class InterpreterService {
     }
 
     const MAX_ITERATIONS = 10;
-    
+
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
       // Check condition
       const conditionResult = condition ? this.evaluateCondition(condition) : true;
-      
+
       this.executionSteps.push({
         type: 'EVALUATE_LOOP_CONDITION',
         line: node.startPosition.row + 1,
@@ -741,7 +793,13 @@ class InterpreterService {
 
       // Update
       if (update) {
-        this.analyzeExpressionStatement(update);
+        if (update.type === 'update_expression') {
+          this.analyzeUpdateExpression(update, node.startPosition.row + 1);
+        } else if (update.type === 'assignment_expression') {
+          this.analyzeAssignment(update, node.startPosition.row + 1);
+        } else {
+          this.analyzeExpressionStatement(update);
+        }
       }
 
       this.executionSteps.push({
@@ -771,9 +829,11 @@ class InterpreterService {
   evaluateCondition(conditionNode) {
     if (!conditionNode) return false;
 
-    // Extract the actual condition from parenthesized_expression
+    // Extract the actual condition from wrappers
     let condition = conditionNode;
-    if (condition.type === 'parenthesized_expression') {
+
+    // Recursively unwrap condition_clause (e.g. "while (x < 5)") and parenthesized_expression (e.g. "(x < 5)")
+    while (condition && (condition.type === 'condition_clause' || condition.type === 'parenthesized_expression')) {
       condition = condition.namedChild(0);
     }
 
@@ -783,14 +843,14 @@ class InterpreterService {
     if (condition.type === 'binary_expression') {
       const left = condition.childForFieldName('left');
       const right = condition.childForFieldName('right');
-      const operator = condition.children.find(c => 
+      const operator = condition.children.find(c =>
         ['>', '<', '==', '!=', '>=', '<=', '&&', '||'].includes(c.text)
       );
 
       if (!operator) return false;
 
-      const leftValue = this.evaluateExpression(left);
-      const rightValue = this.evaluateExpression(right);
+      const leftValue = this.evaluateExpression(left, true);
+      const rightValue = this.evaluateExpression(right, true);
 
       switch (operator.text) {
         case '>': return leftValue > rightValue;
@@ -900,12 +960,12 @@ class InterpreterService {
    */
   getFunctionName(declarator) {
     if (!declarator) return 'unknown';
-    
+
     if (declarator.type === 'function_declarator') {
       const funcDecl = declarator.childForFieldName('declarator');
       return funcDecl ? funcDecl.text : 'unknown';
     }
-    
+
     return declarator.text;
   }
 
@@ -914,19 +974,19 @@ class InterpreterService {
    */
   getVariableName(declarator) {
     if (!declarator) return 'unknown';
-    
+
     if (declarator.type === 'pointer_declarator') {
       return this.getVariableName(declarator.namedChild(0));
     }
-    
+
     if (declarator.type === 'array_declarator') {
       return this.getVariableName(declarator.childForFieldName('declarator'));
     }
-    
+
     if (declarator.type === 'identifier') {
       return declarator.text;
     }
-    
+
     // Find first identifier in children
     for (let i = 0; i < declarator.childCount; i++) {
       const child = declarator.child(i);
@@ -934,7 +994,7 @@ class InterpreterService {
         return child.text;
       }
     }
-    
+
     return declarator.text;
   }
 
@@ -943,37 +1003,38 @@ class InterpreterService {
    */
   getFullType(baseType, declarator) {
     if (!declarator) return baseType;
-    
+
     console.log('🔍 getFullType:', { baseType, declaratorType: declarator.type, declaratorText: declarator.text });
-    
+
     if (declarator.type === 'pointer_declarator') {
       // Recursively handle nested pointer declarators (int**, int***, etc.)
       const innerDeclarator = declarator.namedChild(0);
       console.log('🔍 Nested pointer declarator found, recursing with inner:', innerDeclarator?.type);
       return this.getFullType(baseType + '*', innerDeclarator);
     }
-    
+
     if (declarator.type === 'array_declarator') {
       return baseType; // Handle array separately
     }
-    
+
     console.log('🔍 Final type:', baseType);
     return baseType;
   }
 
   /**
    * Evaluate an expression to get its value
+   * @param {boolean} useAnalysisState - If true, look up variable values from analysis-time tracking
    */
-  evaluateExpression(node) {
+  evaluateExpression(node, useAnalysisState = false) {
     if (!node) return 'undefined';
-    
+
     switch (node.type) {
       case 'number_literal':
         return parseInt(node.text);
-      
+
       case 'string_literal':
         return node.text;
-      
+
       case 'pointer_expression':
         // & operator - return address
         const target = node.namedChild(0);
@@ -983,10 +1044,14 @@ class InterpreterService {
           return this.generateAddress();
         }
         return '0x0';
-      
+
       case 'identifier':
+        // During analysis phase, look up tracked variable values for proper condition evaluation
+        if (useAnalysisState && this.analysisVariables.has(node.text)) {
+          return this.analysisVariables.get(node.text);
+        }
         return node.text;
-      
+
       default:
         return node.text;
     }
@@ -997,41 +1062,41 @@ class InterpreterService {
    */
   extractCoutOutput(node) {
     const text = node.text;
-    
+
     // Parse the cout expression to extract all parts
     let output = '';
-    
+
     // Match string literals
     const parts = [];
     let remaining = text;
-    
+
     // Extract all << separated parts
     const coutParts = text.split('<<').slice(1); // Skip 'cout' part
-    
+
     for (const part of coutParts) {
       const trimmed = part.trim().replace(/;$/, '').replace(/endl$/, '');
-      
+
       // String literal
-      const stringMatch = trimmed.match(/^"([^"]*)"/);  
+      const stringMatch = trimmed.match(/^"([^"]*)"/);
       if (stringMatch) {
         output += stringMatch[1];
         continue;
       }
-      
+
       // Double pointer dereference like **handle
       const doubleDerefMatch = trimmed.match(/^\*\*(\w+)/);
       if (doubleDerefMatch) {
         output += `{**${doubleDerefMatch[1]}}`; // Placeholder to be replaced at runtime
         continue;
       }
-      
+
       // Single pointer dereference like *ptr
       const derefMatch = trimmed.match(/^\*(\w+)/);
       if (derefMatch) {
         output += `{*${derefMatch[1]}}`; // Placeholder to be replaced at runtime
         continue;
       }
-      
+
       // Variable reference
       const varMatch = trimmed.match(/^(\w+)/);
       if (varMatch) {
@@ -1039,7 +1104,7 @@ class InterpreterService {
         continue;
       }
     }
-    
+
     return output || 'Output';
   }
 
@@ -1049,18 +1114,18 @@ class InterpreterService {
   async executeSteps(steps, onStep) {
     console.log('🚀 InterpreterService v2.0 - Branch Skipping Active');
     const skipBranches = new Map(); // Maps conditionalParent index to branch to skip
-    
+
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
-      
+
       console.log(`Step ${i}:`, step.type, step.conditionalBranches ? `(branches: ${JSON.stringify(step.conditionalBranches)})` : '');
-      
+
       // Check if this step should be skipped based on conditional branches
       if (step.conditionalBranches && step.conditionalBranches.length > 0) {
         const shouldSkipStep = step.conditionalBranches.some(({ branch, parent }) => {
           return skipBranches.get(parent) === branch;
         });
-        
+
         if (shouldSkipStep) {
           console.log(`  ✗ SKIPPING this step`);
           continue; // Skip this step
@@ -1068,7 +1133,7 @@ class InterpreterService {
           console.log(`  ✓ EXECUTING this step`);
         }
       }
-      
+
       // If this is an IF_STATEMENT, evaluate condition and decide which branch to skip
       if (step.type === 'IF_STATEMENT') {
         const conditionResult = this.evaluateConditionFromState(step.data.condition);
@@ -1077,7 +1142,7 @@ class InterpreterService {
           result: conditionResult,
           willSkip: conditionResult ? 'if-false' : 'if-true'
         });
-        
+
         // Store which branch to skip
         if (conditionResult) {
           // Condition is true, skip false branch
@@ -1089,15 +1154,15 @@ class InterpreterService {
           console.log(`  → Setting skipBranches[${i}] = 'if-true'`);
         }
       }
-      
+
       // Call the callback for highlighting/tracking
       if (onStep) {
         onStep(i, step);
       }
-      
+
       // Execute the step
       await this.executeStep(step);
-      
+
       // Wait before next step
       await this.delay(800);
     }
@@ -1111,11 +1176,11 @@ class InterpreterService {
       case 'PUSH_FRAME':
         this.vizActions.pushFrame(step.data.name);
         break;
-      
+
       case 'POP_FRAME':
         this.vizActions.popFrame();
         break;
-      
+
       case 'SET_VARIABLE':
         // Check if this is a pointer to an existing variable
         let finalValue = step.data.value;
@@ -1123,14 +1188,14 @@ class InterpreterService {
           // Try to find the variable this address refers to
           // This is a simplified approach - in reality we'd track addresses properly
         }
-        
+
         // Track variable synchronously for condition evaluation
         this.runtimeVariables.set(step.data.name, {
           value: finalValue,
           type: step.data.type,
           address: step.data.address
         });
-        
+
         this.vizActions.setVariable(
           step.data.name,
           finalValue,
@@ -1138,11 +1203,11 @@ class InterpreterService {
           step.data.address
         );
         break;
-      
+
       case 'LOG_OUTPUT':
         // Resolve variable placeholders in output text
         let outputText = step.data.text;
-        
+
         // Get current frame from visualization state
         if (this.getState && outputText.includes('{')) {
           const currentState = this.getState();
@@ -1151,73 +1216,73 @@ class InterpreterService {
             stackLength: currentState.stack.length,
             currentFrame: currentState.stack[currentState.stack.length - 1]
           });
-          
-          const currentFrame = currentState.stack.length > 0 
-            ? currentState.stack[currentState.stack.length - 1] 
+
+          const currentFrame = currentState.stack.length > 0
+            ? currentState.stack[currentState.stack.length - 1]
             : null;
-          
+
           if (currentFrame && currentFrame.variables) {
             // IMPORTANT: Process in order of specificity (most specific first)
-            
+
             // 1. Replace {**doublePtrName} with double dereferenced value
             outputText = outputText.replace(/\{\*\*(\w+)\}/g, (match, ptrName) => {
               const ptrData = currentFrame.variables[ptrName];
               console.log('🔍 Double Deref - Looking for:', ptrName);
               console.log('🔍 Double Deref - Found variable:', ptrData);
               console.log('🔍 Double Deref - All variables:', currentFrame.variables);
-              
+
               if (!ptrData) {
                 console.log('❌ Variable not found:', ptrName);
                 return match;
               }
-              
+
               if (!ptrData.type || !ptrData.type.includes('**')) {
                 console.log('❌ Variable is not a double pointer:', ptrData.type);
                 return match;
               }
-              
+
               // First level: pointer to pointer points to a variable
               const valueStr = String(ptrData.value);
               console.log('🔍 Double Deref - Value string:', valueStr);
-              
+
               const varRefMatch = valueStr.match(/^&(\w+)$/);
               if (!varRefMatch) {
                 console.log('❌ Value does not match &varName pattern:', valueStr);
                 return match;
               }
-              
+
               const intermediateVarName = varRefMatch[1];
               const intermediateVar = currentFrame.variables[intermediateVarName];
               console.log('🔍 Double Deref - Intermediate var name:', intermediateVarName);
               console.log('🔍 Double Deref - Intermediate var data:', intermediateVar);
-              
+
               if (!intermediateVar) {
                 console.log('❌ Intermediate variable not found:', intermediateVarName);
                 return match;
               }
-              
+
               if (!intermediateVar.type || !intermediateVar.type.includes('*')) {
                 console.log('❌ Intermediate variable is not a pointer:', intermediateVar.type);
                 return match;
               }
-              
+
               // Second level: intermediate pointer points to actual variable
               const intermediateValueStr = String(intermediateVar.value);
               console.log('🔍 Double Deref - Intermediate value:', intermediateValueStr);
-              
+
               const varRefMatch2 = intermediateValueStr.match(/^&(\w+)$/);
               if (varRefMatch2) {
                 const targetVarName = varRefMatch2[1];
                 const targetVar = currentFrame.variables[targetVarName];
                 console.log('🔍 Double Deref - Target var name:', targetVarName);
                 console.log('🔍 Double Deref - Target var data:', targetVar);
-                
+
                 if (targetVar) {
                   console.log('✅ Double Deref SUCCESS! Returning:', targetVar.value);
                   return String(targetVar.value);
                 }
               }
-              
+
               // Check if intermediate points to array element
               const arrayMatch = intermediateValueStr.match(/^(.+)\[(\d+)\]$/);
               if (arrayMatch) {
@@ -1229,11 +1294,11 @@ class InterpreterService {
                   return String(arrayVar.value[index]);
                 }
               }
-              
+
               console.log('❌ Could not resolve double dereference');
               return match;
             });
-            
+
             // 2. Replace {*ptrName} with dereferenced value
             outputText = outputText.replace(/\{\*(\w+)\}/g, (match, ptrName) => {
               const ptrData = currentFrame.variables[ptrName];
@@ -1242,7 +1307,7 @@ class InterpreterService {
                 allVariables: currentFrame.variables,
                 lookingForAddress: ptrData?.value
               });
-              
+
               if (ptrData && ptrData.type && ptrData.type.includes('*')) {
                 // Check if pointing to array element: arr[2]
                 const arrayMatch = String(ptrData.value).match(/^(.+)\[(\d+)\]$/);
@@ -1250,7 +1315,7 @@ class InterpreterService {
                   const arrayName = arrayMatch[1];
                   const index = parseInt(arrayMatch[2]);
                   const arrayVar = currentFrame.variables[arrayName];
-                  
+
                   if (arrayVar && Array.isArray(arrayVar.value) && arrayVar.value[index] !== undefined) {
                     console.log('🔍 Found array element:', arrayVar.value[index]);
                     return String(arrayVar.value[index]);
@@ -1263,7 +1328,7 @@ class InterpreterService {
                     const targetVar = currentFrame.variables[targetVarName];
                     return targetVar ? String(targetVar.value) : match;
                   }
-                  
+
                   // Find the variable that this pointer points to by address
                   const targetVar = Object.values(currentFrame.variables).find(
                     v => v.address === ptrData.value
@@ -1274,7 +1339,7 @@ class InterpreterService {
               }
               return match;
             });
-            
+
             // 3. Replace {varName} with actual value (plain variables)
             outputText = outputText.replace(/\{(\w+)\}/g, (match, varName) => {
               const varData = currentFrame.variables[varName];
@@ -1282,27 +1347,27 @@ class InterpreterService {
               return varData ? String(varData.value) : match;
             });
           }
-          
+
           console.log('🔍 Final output text:', outputText);
         }
-        
+
         this.vizActions.logOutput(outputText);
         break;
-      
+
       case 'UPDATE_VARIABLE':
         // Update pointer value (reassignment)
         {
           const varData = this.runtimeVariables.get(step.data.name);
           if (varData) {
             let newValue = step.data.value;
-            
+
             // Handle pointer arithmetic marker: __PTR_ARITH__pArr__+__2
             if (typeof newValue === 'string' && newValue.startsWith('__PTR_ARITH__')) {
               const parts = newValue.split('__');
               const ptrName = parts[2];
               const op = parts[3];
               const offset = parseInt(parts[4]);
-              
+
               const ptrData = this.runtimeVariables.get(ptrName);
               if (ptrData) {
                 const arrayMatch = String(ptrData.value).match(/^(.+)\[(\d+)\]$/);
@@ -1314,13 +1379,13 @@ class InterpreterService {
                 }
               }
             }
-            
+
             // Sync runtime state
             this.runtimeVariables.set(step.data.name, {
               ...varData,
               value: newValue
             });
-            
+
             this.vizActions.setVariable(
               step.data.name,
               newValue,
@@ -1330,26 +1395,67 @@ class InterpreterService {
           }
         }
         break;
-      
+
+      case 'UPDATE_VARIABLE':
+        {
+          const existingVar = this.runtimeVariables.get(step.data.name);
+          if (existingVar) {
+            // Update runtime state
+            this.runtimeVariables.set(step.data.name, {
+              ...existingVar,
+              value: step.data.value
+            });
+
+            // Update visualization
+            this.vizActions.setVariable(
+              step.data.name,
+              step.data.value,
+              existingVar.type,
+              existingVar.address
+            );
+          }
+        }
+        break;
+
       case 'POINTER_INCREMENT':
-        // Handle pArr++ or pArr--
+        // Handle pArr++ or pArr-- or i++
         {
           const ptrData = this.runtimeVariables.get(step.data.name);
           if (ptrData) {
+            // Check if it's a pointer to an array element: arr[0] -> arr[1]
             const arrayMatch = String(ptrData.value).match(/^(.+)\[(\d+)\]$/);
-            
+
             if (arrayMatch) {
               const arrayName = arrayMatch[1];
               const currentIndex = parseInt(arrayMatch[2]);
               const newIndex = currentIndex + step.data.delta;
+
+              // Handle generic array pointer logic
               const newValue = `${arrayName}[${newIndex}]`;
-              
+
               // Sync runtime state
               this.runtimeVariables.set(step.data.name, {
                 ...ptrData,
                 value: newValue
               });
-              
+
+              this.vizActions.setVariable(
+                step.data.name,
+                newValue,
+                ptrData.type,
+                ptrData.address
+              );
+            }
+            // Check if it's a regular number (int i = 0; i++)
+            else if (typeof ptrData.value === 'number') {
+              const newValue = ptrData.value + step.data.delta;
+
+              // Sync runtime state
+              this.runtimeVariables.set(step.data.name, {
+                ...ptrData,
+                value: newValue
+              });
+
               this.vizActions.setVariable(
                 step.data.name,
                 newValue,
@@ -1360,30 +1466,30 @@ class InterpreterService {
           }
         }
         break;
-      
+
       case 'DEREF_ASSIGN':
         // Handle *pArr = 999 (modify array element through pointer)
         {
           const ptrData = this.runtimeVariables.get(step.data.pointerName);
           if (ptrData) {
             const arrayMatch = String(ptrData.value).match(/^(.+)\[(\d+)\]$/);
-            
+
             if (arrayMatch) {
               const arrayName = arrayMatch[1];
               const index = parseInt(arrayMatch[2]);
               const arrayVar = this.runtimeVariables.get(arrayName);
-              
+
               if (arrayVar && Array.isArray(arrayVar.value)) {
                 // Clone the array and modify it
                 const newArray = [...arrayVar.value];
                 newArray[index] = step.data.value;
-                
+
                 // Sync runtime state
                 this.runtimeVariables.set(arrayName, {
                   ...arrayVar,
                   value: newArray
                 });
-                
+
                 this.vizActions.setVariable(
                   arrayName,
                   newArray,
@@ -1395,14 +1501,14 @@ class InterpreterService {
               // Pointer to regular variable: &y
               const targetVarName = String(ptrData.value).substring(1);
               const targetVar = this.runtimeVariables.get(targetVarName);
-              
+
               if (targetVar) {
                 // Sync runtime state
                 this.runtimeVariables.set(targetVarName, {
                   ...targetVar,
                   value: step.data.value
                 });
-                
+
                 this.vizActions.setVariable(
                   targetVarName,
                   step.data.value,
@@ -1414,17 +1520,17 @@ class InterpreterService {
           }
         }
         break;
-      
+
       case 'IF_STATEMENT':
         // Condition evaluation happens in the Editor execution loop
         // This step just marks the if statement for visualization
         break;
-      
+
       case 'SWITCH_STATEMENT':
         // Switch evaluation happens in the Editor execution loop
         // This step just marks the switch statement for visualization
         break;
-      
+
       case 'EVALUATE_CONDITION':
       case 'ENTER_BRANCH':
       case 'EXIT_BRANCH':
@@ -1436,7 +1542,7 @@ class InterpreterService {
         // Control flow steps - just for visualization/tracking
         // No state changes needed, these are for debugging/visualization
         break;
-      
+
       case 'RETURN':
         // Just mark the line
         break;
