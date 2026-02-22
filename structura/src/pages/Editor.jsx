@@ -173,6 +173,14 @@ int main() {
       // Skip steps belonging to untaken branches (supports nested if/else and switch)
       if (shouldSkipStep(step)) continue;
 
+      // Handle Early Return (Skip steps until we exit the function)
+      if (interpreterRef.current.isReturning) {
+        if (step.type !== 'RETURN_FROM_CALL') {
+          continue;
+        }
+        // If it IS RETURN_FROM_CALL, we execute it to pop the frame and reset isReturning
+      }
+
       // Evaluate control flow at runtime
       evaluateControlFlow(step, i);
 
@@ -469,12 +477,12 @@ int main() {
       {/* Main Content - Sidebar + Editor + Visualization */}
       <div className="flex h-screen">
         {/* Code Snippets Sidebar */}
-        <CodeSnippets 
+        <CodeSnippets
           onSelectSnippet={handleSnippetSelect}
           isOpen={sidebarOpen}
           onToggle={() => setSidebarOpen(!sidebarOpen)}
         />
-        
+
         {/* Middle - Editor + Console */}
         <div className="flex-[2] flex flex-col border-r border-gray-800 min-w-0">
           {/* Editor Header */}

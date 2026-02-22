@@ -12,10 +12,15 @@ class InterpreterService {
     this.executionSteps = [];
     this.memoryAddressCounter = 0x7FFE1A00; // Mock stack addresses
     this.variableAddresses = new Map(); // Track variable name -> address mapping
+    this.arraySizes = new Map(); // Store array sizes for sizeof calculation (varName -> size in bytes)
     this.runtimeVariables = new Map(); // Synchronous runtime state for condition evaluation
     this.analysisVariables = new Map(); // Track variable values during analysis phase (for loop conditions)
+    this.functionMap = new Map(); // Store function definitions
+    this.callDepth = 0; // Track recursion depth per function
+    this.callStack = []; // Runtime call stack for variable scoping
+    this.lastReturnValue = null; // Store return value from function calls
+    this.isReturning = false; // Flag to indicate early return from function
   }
-
   /**
    * Generate a mock memory address
    */
@@ -55,10 +60,39 @@ class InterpreterService {
     this.executionSteps = [];
     this.runtimeVariables = new Map();
     this.variableAddresses.clear();
+    this.functionMap.clear();
+    this.arraySizes.clear();
 
-    this.analyzeNode(tree.rootNode);
+    // Import parser service to extract functions
+    // We assume parserService is available or imported. 
+    // Since we can't easily import it here without changing imports, 
+    // we'll implement a simple extractor or assume tree traversal.
+    // Better: traverse root children to populate functionMap.
+    this.populateFunctionMap(tree.rootNode);
+
+    const mainNode = this.functionMap.get('main');
+    if (mainNode) {
+      this.analyzeNode(mainNode);
+    } else {
+      console.warn('⚠️ No main function found, falling back to top-level traversal');
+      this.analyzeNode(tree.rootNode);
+    }
 
     return this.executionSteps;
+  }
+
+  /**
+   * Populate function map from AST
+   */
+  populateFunctionMap(rootNode) {
+    for (let i = 0; i < rootNode.namedChildCount; i++) {
+      const node = rootNode.namedChild(i);
+      if (node.type === 'function_definition') {
+        const declarator = node.childForFieldName('declarator');
+        const name = this.getFunctionName(declarator);
+        this.functionMap.set(name, node);
+      }
+    }
   }
 
   /**
@@ -76,6 +110,10 @@ class InterpreterService {
         break;
 
       case 'function_definition':
+        // If we hit this during traversal (and not via specific call), ignore it
+        // unless we are in fallback mode (analyzing root linearly)
+        // But since we control the flow now, explicit function definition visits are rare
+        // except when analyzing 'main'.
         this.analyzeFunctionDefinition(node);
         break;
 
@@ -136,7 +174,12 @@ class InterpreterService {
         break;
 
       case 'expression_statement':
-        this.analyzeExpressionStatement(node);
+        // Check if it's a function call only (e.g. `bubbleSort(arr, n);`)
+        if (node.namedChild(0)?.type === 'call_expression') {
+          this.analyzeFunctionCall(node.namedChild(0));
+        } else {
+          this.analyzeExpressionStatement(node);
+        }
         break;
 
       case 'if_statement':
@@ -184,7 +227,7 @@ class InterpreterService {
 
         const varName = this.getVariableName(declarator);
         const varType = this.getFullType(type, declarator);
-        let varValue = value ? this.evaluateExpression(value) : 'undefined';
+        let varValue = value ? this.evaluateExpression(value, true) : 'undefined';
         const address = this.generateAddress();
 
         // Check if this is an array declaration
@@ -200,7 +243,7 @@ class InterpreterService {
             const values = [];
             for (let j = 0; j < value.namedChildCount; j++) {
               const elem = value.namedChild(j);
-              values.push(this.evaluateExpression(elem));
+              values.push(this.evaluateExpression(elem, true));
             }
             varValue = values;
           } else {
@@ -211,16 +254,24 @@ class InterpreterService {
           // Store array base address
           this.variableAddresses.set(varName, address);
 
+          const finalSize = varValue && Array.isArray(varValue) ? varValue.length : arraySize;
+          const elementSize = 4; // Assume int/float/pointer = 4 bytes
+          this.arraySizes.set(varName, finalSize * elementSize);
+          console.log(`📏 Array Size Tracked: ${varName} = ${finalSize} elements (${finalSize * elementSize} bytes)`);
+
           this.executionSteps.push({
             type: 'SET_VARIABLE',
             line: node.startPosition.row + 1,
             data: {
               name: varName,
               value: varValue,
-              type: `${type}[${arraySize}]`,
+              type: typeNode ? `${typeNode.text}[${finalSize}]` : `int[${finalSize}]`,
               address: address
             }
           });
+
+          // Track array value for analysis (so subscript expressions work)
+          this.analysisVariables.set(varName, varValue);
         } else if (varType.includes('*') && value) {
           // Handle pointer declaration
           console.log('🔍 Pointer declaration detected:', {
@@ -251,7 +302,7 @@ class InterpreterService {
                 argText: arg?.text
               });
 
-              const val = this.evaluateExpression(arg);
+              const val = this.evaluateExpression(arg, true);
               // Only update if evaluation succeeded (evaluateExpression returns 'undefined' string on failure)
               if (val !== 'undefined' && val !== undefined) {
                 initialValue = val;
@@ -266,7 +317,7 @@ class InterpreterService {
               initialValue = { data: 0, next: 'nullptr' };
               // If args provided: new Node(10) - assuming constructor sets data
               if (argsNode && argsNode.namedChildCount > 0) {
-                const val = this.evaluateExpression(argsNode.namedChild(0));
+                const val = this.evaluateExpression(argsNode.namedChild(0), true);
                 initialValue.data = val;
               }
             }
@@ -320,7 +371,7 @@ class InterpreterService {
                 if (indexNode.type === 'number_literal') {
                   index = parseInt(indexNode.text, 10);
                 } else {
-                  index = parseInt(indexNode.text, 10) || this.evaluateExpression(indexNode);
+                  index = parseInt(indexNode.text, 10) || this.evaluateExpression(indexNode, true);
                 }
               }
 
@@ -371,29 +422,163 @@ class InterpreterService {
             }
           });
         } else {
-          // Regular variable
+          // Regular variable OR declaration initialized with function call
+          // int index = binarySearch(arr, n, key);
 
-          // Store the address for this variable
-          this.variableAddresses.set(varName, address);
+          if (value && value.type === 'call_expression') {
+            // 1. Declare variable (undefined initially)
+            this.variableAddresses.set(varName, address);
+            this.executionSteps.push({
+              type: 'SET_VARIABLE',
+              line: node.startPosition.row + 1,
+              data: {
+                name: varName,
+                value: '?',
+                type: varType,
+                address: address
+              }
+            });
 
-          this.executionSteps.push({
-            type: 'SET_VARIABLE',
-            line: node.startPosition.row + 1,
-            data: {
-              name: varName,
-              value: varValue,
-              type: varType,
-              address: address
+            // 2. Execute function call
+            // We need to capture the return value. 
+            // In our static unrolling, analyzeFunctionCall handles the "CALL", "BODY", "RETURN".
+            // We need to simulate the assignment of the return value.
+            // We can emit a special step `ASSIGN_RETURN_VALUE` after the call?
+
+            this.analyzeFunctionCall(value, varName); // Pass targetVarName to assign result to
+          } else {
+            // Regular variable
+            this.variableAddresses.set(varName, address);
+
+            this.executionSteps.push({
+              type: 'SET_VARIABLE',
+              line: node.startPosition.row + 1,
+              data: {
+                name: varName,
+                value: varValue,
+                type: varType,
+                address: address
+              }
+            });
+
+            // Track variable value during analysis phase for loop condition evaluation
+            if (typeof varValue === 'number') {
+              this.analysisVariables.set(varName, varValue);
             }
-          });
-
-          // Track variable value during analysis phase for loop condition evaluation
-          if (typeof varValue === 'number') {
-            this.analysisVariables.set(varName, varValue);
           }
         }
       }
     }
+  }
+
+  /**
+   * Analyze function call and unroll steps
+   * @param {object} node - call_expression node
+   * @param {string} targetVarName - Optional variable to assign return value to
+   */
+  analyzeFunctionCall(node, targetVarName = null) {
+    const functionNameNode = node.childForFieldName('function');
+    const functionName = functionNameNode ? functionNameNode.text : 'unknown';
+    const argsNode = node.childForFieldName('arguments'); // argument_list
+
+    console.log(`Analyzing Call: ${functionName}`);
+
+    // Check recursion limit
+    if (this.callDepth > 20) {
+      console.warn('⚠️ Max recursion depth reached');
+      return;
+    }
+
+    const funcDef = this.functionMap.get(functionName);
+    if (!funcDef) {
+      console.warn(`Function definition not found: ${functionName}`);
+      return;
+    }
+
+    // Evaluate arguments to pass values
+    const args = [];
+    if (argsNode) {
+      for (let i = 0; i < argsNode.namedChildCount; i++) {
+        const arg = argsNode.namedChild(i);
+        // We want the analysis-time value if possible
+        const val = this.evaluateExpression(arg, true);
+        args.push({
+          value: val,
+          text: arg.text
+        });
+      }
+    }
+
+    // Enter Function Step
+    this.executionSteps.push({
+      type: 'CALL',
+      line: node.startPosition.row + 1,
+      data: {
+        name: functionName,
+        args: args,
+        targetVar: targetVarName
+      }
+    });
+
+    this.callDepth++;
+
+    // Process Function Parameter Mapping
+    // mapped to argument values
+    const declarator = funcDef.childForFieldName('declarator'); // function_declarator
+    const parameters = declarator.childForFieldName('parameters'); // parameter_list
+
+    if (parameters) {
+      for (let i = 0; i < parameters.namedChildCount; i++) {
+        if (i >= args.length) break;
+        const param = parameters.namedChild(i); // parameter_declaration
+        const paramType = param.childForFieldName('type')?.text || 'int';
+        const paramDecl = param.childForFieldName('declarator'); // identifier or reference
+
+        // Fix: Use getVariableName to handle array declarators (arr[]) correctly
+        let paramName = `p${i}`;
+        if (paramDecl) {
+          paramName = this.getVariableName(paramDecl);
+        }
+        const argVal = args[i].value;
+
+        // Emit step to initialize parameter in new frame
+        this.executionSteps.push({
+          type: 'PARAM_INIT',
+          line: funcDef.startPosition.row + 1, // Start of function
+          data: {
+            name: paramName,
+            value: argVal,
+            type: paramType
+          }
+        });
+
+        // Track param for analysis so loops inside function work
+        if (typeof argVal === 'number' || Array.isArray(argVal)) {
+          // Note: This overwrites global analysis map for now (shadowing issue).
+          // For static unrolling to work perfectly with recursion analysis, we'd need a stack for analysisVariables too.
+          // For now, simpler: just set it.
+          this.analysisVariables.set(paramName, argVal);
+        }
+      }
+    }
+
+    // Body
+    const body = funcDef.childForFieldName('body');
+    if (body) {
+      this.analyzeFunctionBody(body);
+    }
+
+    this.callDepth--;
+
+    // Exit step
+    this.executionSteps.push({
+      type: 'RETURN_FROM_CALL',
+      line: node.endPosition.row + 1,
+      data: {
+        name: functionName,
+        targetVar: targetVarName
+      }
+    });
   }
 
   /**
@@ -445,10 +630,51 @@ class InterpreterService {
 
     console.log('🔄 Assignment:', { left: left.text, right: right.text, leftType: left.type });
 
+    // Case 0: Array element assignment: arr[i] = 10
+    if (left.type === 'subscript_expression') {
+      const arrayNode = left.childForFieldName('argument');
+      let indexExpr = left.childForFieldName('index');
+
+      // Index fallback logic (same as in evaluateExpression)
+      if (!indexExpr) indexExpr = left.childForFieldName('subscript');
+      if (!indexExpr && left.namedChildCount >= 2) indexExpr = left.namedChild(1);
+
+      // Unwrap nested index [i] -> i logic
+      if (indexExpr && (indexExpr.type === 'subscript_argument' || indexExpr.text.startsWith('['))) {
+        if (indexExpr.namedChildCount > 0) {
+          indexExpr = indexExpr.namedChild(0);
+        }
+      }
+
+      if (arrayNode && indexExpr) {
+        const arrayName = arrayNode.text;
+        const indexVal = this.evaluateExpression(indexExpr, true);
+        const newValue = this.evaluateExpression(right, true);
+
+        console.log(`🔄 Array Assignment: ${arrayName}[${indexVal}] = ${newValue}`);
+
+        this.executionSteps.push({
+          type: 'UPDATE_ARRAY_ELEMENT',
+          line: line,
+          data: {
+            arrayName: arrayName,
+            index: indexVal,
+            value: newValue
+          }
+        });
+
+        // Update analysis tracking if possible (simplified)
+        // We can't easily update a specific index in analysisVariables if it stores the whole array
+        // But we can check if it exists and try to update it?
+        // optimizing: skipping full array state update for now to avoid complexity, relying on runtime steps.
+        return;
+      }
+    }
+
     // Case 1: Pointer dereference assignment: *pArr = 999
     if (left.type === 'pointer_expression' && left.text.startsWith('*')) {
       const ptrName = left.namedChild(0)?.text;
-      const newValue = this.evaluateExpression(right);
+      const newValue = this.evaluateExpression(right, true);
 
       this.executionSteps.push({
         type: 'DEREF_ASSIGN',
@@ -472,7 +698,7 @@ class InterpreterService {
 
         // Evaluate right side (could be number, identifier, new expr?)
         // For node->next = node2, evaluateExpression(node2) -> address
-        const rhsValue = this.evaluateExpression(right);
+        const rhsValue = this.evaluateExpression(right, true);
 
         console.log('🔄 Field Assignment:', { ptrName, fieldName, rhsValue });
 
@@ -624,10 +850,16 @@ class InterpreterService {
    * Analyze return statement
    */
   analyzeReturnStatement(node) {
+    let returnValue = null;
+    if (node.namedChildCount > 0) {
+      const expr = node.namedChild(0);
+      returnValue = this.evaluateExpression(expr, true);
+    }
+
     this.executionSteps.push({
       type: 'RETURN',
       line: node.startPosition.row + 1,
-      data: {}
+      data: { value: returnValue }
     });
   }
 
@@ -638,6 +870,12 @@ class InterpreterService {
     const condition = node.childForFieldName('condition');
     const consequence = node.childForFieldName('consequence');
     const alternative = node.childForFieldName('alternative');
+
+    // Evaluate condition statically to guide state tracking
+    const conditionResult = this.evaluateCondition(condition);
+    console.log(`🧠 IF Check: "${condition?.text}" -> ${conditionResult}`);
+    // Snapshot state before branches
+    const preBranchState = new Map(this.analysisVariables);
 
     // Store both branches, but mark them - execution will decide which to run
     const ifStatementIndex = this.executionSteps.length;
@@ -669,6 +907,15 @@ class InterpreterService {
       }
     }
 
+    // Capture state after true branch
+    const postTrueState = new Map(this.analysisVariables);
+
+    // If condition is FALSE, the true branch effects should not persist
+    // Revert to pre-branch state before analyzing false branch
+    if (conditionResult === false) {
+      this.analysisVariables = new Map(preBranchState);
+    }
+
     // Analyze false branch (mark steps as conditional)
     if (alternative) {
       const falseBranchStart = this.executionSteps.length;
@@ -685,6 +932,12 @@ class InterpreterService {
           parent: ifStatementIndex
         });
       }
+    }
+
+    // If condition is TRUE, the false branch effects should not persist
+    // We should restore the state to what it was after the true branch
+    if (conditionResult === true) {
+      this.analysisVariables = postTrueState;
     }
   }
 
@@ -937,11 +1190,16 @@ class InterpreterService {
       const leftValue = this.evaluateExpression(left, true);
       const rightValue = this.evaluateExpression(right, true);
 
+      console.log(`🧠 Eval Static: ${leftValue} ${operator.text} ${rightValue}`);
+      const lNum = Number(leftValue);
+      const rNum = Number(rightValue);
+      const useNum = !isNaN(lNum) && !isNaN(rNum);
+
       switch (operator.text) {
-        case '>': return leftValue > rightValue;
-        case '<': return leftValue < rightValue;
-        case '>=': return leftValue >= rightValue;
-        case '<=': return leftValue <= rightValue;
+        case '>': return useNum ? lNum > rNum : leftValue > rightValue;
+        case '<': return useNum ? lNum < rNum : leftValue < rightValue;
+        case '>=': return useNum ? lNum >= rNum : leftValue >= rightValue;
+        case '<=': return useNum ? lNum <= rNum : leftValue <= rightValue;
         case '==': return leftValue == rightValue;
         case '!=': return leftValue != rightValue;
         case '&&': return leftValue && rightValue;
@@ -989,47 +1247,71 @@ class InterpreterService {
     // Remove parentheses
     conditionString = conditionString.replace(/[()]/g, '').trim();
 
-    // Parse binary comparison: x > y, score >= 90, etc.
-    const comparisonMatch = conditionString.match(/(\w+)\s*(>=|<=|>|<|==|!=)\s*(\w+)/);
-    if (comparisonMatch) {
-      const leftVar = comparisonMatch[1];
-      const operator = comparisonMatch[2];
-      const rightOperand = comparisonMatch[3];
+    // Parse binary comparison: supports arr[i] > key, i != -1, etc.
+    // Regex now captures negative numbers and complex terms
+    const comparisonMatch = conditionString.match(/([\w\[\]]+)\s*(>=|<=|>|<|==|!=)\s*(-?[\w\[\]]+)/);
 
-      // Get left value from runtime variables
-      const leftData = variables.get(leftVar);
-      const leftValue = leftData?.value;
-      if (leftValue === undefined) {
-        console.warn('⚠️ Variable not found in runtime state:', leftVar);
+    if (comparisonMatch) {
+      const leftExpr = comparisonMatch[1];
+      const operator = comparisonMatch[2];
+      const rightExpr = comparisonMatch[3];
+
+      // Helper to evaluate a term (variable, array access, or literal)
+      const evaluateTerm = (term) => {
+        // Check for array access: arr[i] or arr[0]
+        const arrayMatch = term.match(/^(\w+)\[(\w+)\]$/);
+        if (arrayMatch) {
+          const arrayName = arrayMatch[1];
+          const indexTerm = arrayMatch[2];
+
+          const arrayData = variables.get(arrayName);
+          if (!arrayData || !Array.isArray(arrayData.value)) {
+            console.warn(`⚠️ Array not found or invalid: ${arrayName}`);
+            return undefined;
+          }
+
+          let index = parseInt(indexTerm);
+          if (isNaN(index)) {
+            // Try to look up index variable
+            const indexVar = variables.get(indexTerm);
+            if (indexVar !== undefined) {
+              index = indexVar.value;
+            } else {
+              return undefined;
+            }
+          }
+
+          return arrayData.value[index];
+        }
+
+        // Simple variable lookup
+        const varData = variables.get(term);
+        if (varData !== undefined) {
+          return varData.value;
+        }
+
+        // Number literal
+        const num = parseInt(term);
+        if (!isNaN(num)) return num;
+
+        return undefined;
+      };
+
+      const leftValue = evaluateTerm(leftExpr);
+      const rightValue = evaluateTerm(rightExpr);
+
+      if (leftValue === undefined || rightValue === undefined) {
+        console.warn(`⚠️ Could not evaluate condition terms: ${leftExpr} ${operator} ${rightExpr}`);
         return false;
       }
 
-      // Get right value (could be variable or literal)
-      const rightData = variables.get(rightOperand);
-      let rightValue = rightData?.value;
-      if (rightValue === undefined) {
-        // Try parsing as number
-        rightValue = parseInt(rightOperand);
-        if (isNaN(rightValue)) return false;
-      }
-
-      console.log('🎯 Condition eval:', leftValue, operator, rightValue, '→', (() => {
-        switch (operator) {
-          case '>': return leftValue > rightValue;
-          case '<': return leftValue < rightValue;
-          case '>=': return leftValue >= rightValue;
-          case '<=': return leftValue <= rightValue;
-          case '==': return leftValue == rightValue;
-          case '!=': return leftValue != rightValue;
-          default: return false;
-        }
-      })());
+      console.log(`🎯 Condition eval: ${leftExpr}(${leftValue}) ${operator} ${rightExpr}(${rightValue})`);
 
       switch (operator) {
-        case '>': return leftValue > rightValue;
-        case '<': return leftValue < rightValue;
-        case '>=': return leftValue >= rightValue;
-        case '<=': return leftValue <= rightValue;
+        case '>': return Number(leftValue) > Number(rightValue);
+        case '<': return Number(leftValue) < Number(rightValue);
+        case '>=': return Number(leftValue) >= Number(rightValue);
+        case '<=': return Number(leftValue) <= Number(rightValue);
         case '==': return leftValue == rightValue;
         case '!=': return leftValue != rightValue;
         default: return false;
@@ -1133,9 +1415,103 @@ class InterpreterService {
         }
         return '0x0';
 
+      case 'binary_expression':
+        const left = this.evaluateExpression(node.childForFieldName('left'), useAnalysisState);
+        const right = this.evaluateExpression(node.childForFieldName('right'), useAnalysisState);
+        const operator = node.childForFieldName('operator').text;
+
+        if (typeof left === 'number' && typeof right === 'number') {
+          switch (operator) {
+            case '+': return left + right;
+            case '-': return left - right;
+            case '*': return left * right;
+            case '/': return Math.floor(left / right); // int division by default
+            case '%': return left % right;
+            case '==': return left === right ? 1 : 0;
+            case '!=': return left !== right ? 1 : 0;
+            case '<': return left < right ? 1 : 0;
+            case '>': return left > right ? 1 : 0;
+            case '<=': return left <= right ? 1 : 0;
+            case '>=': return left >= right ? 1 : 0;
+          }
+        }
+        return `${left} ${operator} ${right}`;
+
+      case 'sizeof_expression':
+        // Handle sizeof(arr) or sizeof(int)
+        // Structure: sizeof_expression -> value (type_descriptor or other expression)
+        let operand = node.namedChild(0);
+
+        // Unwrap parentheses: sizeof((arr)) -> sizeof(arr)
+        while (operand && operand.type === 'parenthesized_expression') {
+          operand = operand.namedChild(0);
+        }
+
+        if (!operand) return 4;
+
+        let targetText = operand.text;
+
+        // Check if it is a type or variable
+        if (targetText === 'int' || targetText === 'float' || targetText.includes('*')) return 4;
+        if (targetText === 'char' || targetText === 'bool') return 1;
+        if (targetText === 'double') return 8;
+
+        // Check if expression is subscript expression: sizeof(arr[0])
+        if (operand.type === 'subscript_expression') {
+          // Assume element size
+          return 4;
+        }
+
+        // Check variable map
+        if (this.arraySizes.has(targetText)) {
+          const size = this.arraySizes.get(targetText);
+          console.log(`📏 SIZEOF(${targetText}) lookup: ${size}`);
+          return size;
+        }
+
+        console.log(`⚠️ SIZEOF(${targetText}) lookup failed, defaulting to 4`);
+        // Default for known variable types?
+        return 4;
+
+      case 'subscript_expression':
+        // Handle arr[0] in expression context
+        const arrayNode = node.childForFieldName('argument'); // array name
+        let indexExpr = node.childForFieldName('index'); // index
+
+        // Fallback if 'index' field is missing (grammar difference)
+        if (!indexExpr) {
+          indexExpr = node.childForFieldName('subscript');
+        }
+        if (!indexExpr && node.namedChildCount >= 2) {
+          indexExpr = node.namedChild(1); // Standard: arr [ index ]
+        }
+
+        // Unwrap if the index node itself is the bracketed part e.g. "[mid]"
+        // Some grammars might treat the whole "[...]" as the index node
+        if (indexExpr && (indexExpr.type === 'subscript_argument' || indexExpr.text.startsWith('['))) {
+          if (indexExpr.namedChildCount > 0) {
+            indexExpr = indexExpr.namedChild(0);
+          }
+        }
+
+        const arrayVal = this.evaluateExpression(arrayNode, true); // Get array (should come from analysisVariables)
+        const idxVal = this.evaluateExpression(indexExpr, true); // Get index
+
+        if (Array.isArray(arrayVal) && typeof idxVal === 'number') {
+          // console.log(`🎯 Resolved subscript: arr[${idxVal}] = ${arrayVal[idxVal]}`);
+          return arrayVal[idxVal];
+        } else {
+          console.log(`⚠️ Subscript FAIL: arr=${Array.isArray(arrayVal) ? 'Array' : typeof arrayVal}, idx=${idxVal} (${typeof idxVal})`,
+            'Node:', node.text, 'IndexNode:', indexExpr ? indexExpr.text : 'NULL');
+        }
+
+        return 0; // Fallback value
+
       case 'identifier':
+
         // During analysis phase, look up tracked variable values for proper condition evaluation
-        if (useAnalysisState && this.analysisVariables.has(node.text)) {
+        // During analysis phase, look up tracked variable values for proper condition evaluation
+        if (this.analysisVariables.has(node.text)) {
           return this.analysisVariables.get(node.text);
         }
         return node.text;
@@ -1263,6 +1639,73 @@ class InterpreterService {
     switch (step.type) {
       case 'PUSH_FRAME':
         this.vizActions.pushFrame(step.data.name);
+        break;
+
+      case 'CALL':
+        // Save current variables to stack before pushing new frame
+        this.callStack.push(new Map(this.runtimeVariables));
+        // We do NOT clear runtimeVariables because we want to pass args? 
+        // Actually, cleaner is: logic below handles PARAM_INIT which sets new variables.
+        // But we should act as if we entered a new scope.
+        // The visualization action `pushFrame` handles the UI stack.
+        // We need to manage `runtimeVariables` (the LOGICAL stack).
+
+        this.vizActions.pushFrame(step.data.name);
+        // Clear local variables for the new frame, but we need to keep global/heap if we had them?
+        // For simplicity, we assume new frame starts empty and params are added via PARAM_INIT.
+        this.runtimeVariables = new Map();
+        break;
+
+      case 'PARAM_INIT':
+        // Initialize parameter in current scope
+        this.runtimeVariables.set(step.data.name, {
+          value: step.data.value,
+          type: step.data.type,
+          address: this.generateAddress()
+        });
+
+        // Also update UI
+        this.vizActions.setVariable(
+          step.data.name,
+          step.data.value,
+          step.data.type,
+          this.generateAddress()
+        );
+        break;
+
+      case 'RETURN_FROM_CALL':
+        this.vizActions.popFrame();
+        // Restore previous scope variables
+        if (this.callStack.length > 0) {
+          this.runtimeVariables = this.callStack.pop();
+        }
+
+        // Handle Return Value Assignment
+        if (step.data.targetVar && this.lastReturnValue !== undefined) {
+          const targetVarName = step.data.targetVar;
+          const existingVar = this.runtimeVariables.get(targetVarName);
+
+          if (existingVar) {
+            // Update runtime variable with return value
+            this.runtimeVariables.set(targetVarName, {
+              ...existingVar,
+              value: this.lastReturnValue
+            });
+
+            // Update Visualization
+            this.vizActions.setVariable(
+              targetVarName,
+              this.lastReturnValue,
+              existingVar.type,
+              existingVar.address
+            );
+
+            console.log(`↩️ Assigned return value ${this.lastReturnValue} to ${targetVarName}`);
+          }
+        }
+
+        this.lastReturnValue = null; // Reset
+        this.isReturning = false; // Reset to continue normal execution in caller
         break;
 
       case 'POP_FRAME':
@@ -1691,7 +2134,12 @@ class InterpreterService {
         break;
 
       case 'RETURN':
-        // Just mark the line
+        // Store return value for the caller
+        if (step.data.value !== undefined) {
+          this.lastReturnValue = step.data.value;
+          console.log(`🔙 RETURN: Captured value ${this.lastReturnValue}`);
+        }
+        this.isReturning = true;
         break;
     }
   }

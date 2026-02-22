@@ -11,12 +11,12 @@ class ParserService {
     try {
       // Dynamically import web-tree-sitter
       const TreeSitterImport = await import('web-tree-sitter');
-      
+
       // The default export is usually the Parser class in ESM/bundlers
       // Sometimes it might be a named export depending on how vite bundles it
       const Parser = TreeSitterImport.default || TreeSitterImport.Parser || TreeSitterImport;
       const Language = TreeSitterImport.Language || Parser.Language;
-      
+
       // Initialize tree-sitter with locateFile to tell it where to find tree-sitter.wasm
       await Parser.init({
         locateFile(scriptName) {
@@ -24,13 +24,13 @@ class ParserService {
           return `/${scriptName}`;
         }
       });
-      
+
       this.parser = new Parser();
-      
+
       // Load the C++ language grammar from public folder
       const Cpp = await Language.load('/tree-sitter-cpp.wasm');
       this.parser.setLanguage(Cpp);
-      
+
       this.initialized = true;
     } catch (error) {
       console.error('❌ Failed to initialize parser:', error);
@@ -56,6 +56,52 @@ class ParserService {
       console.error('❌ Failed to parse code:', error);
       throw error;
     }
+  }
+
+  /**
+   * Scan the AST to find all function definitions
+   * @param {object} tree - The parsed AST
+   * @returns {object} - Map of function names to nodes, and main function node
+   */
+  extractFunctions(tree) {
+    const functions = new Map();
+    let mainFunction = null;
+
+    const cursor = tree.walk();
+    const visit = (node) => {
+      if (node.type === 'function_definition') {
+        const declarator = node.childForFieldName('declarator');
+        const name = this.getFunctionName(declarator);
+
+        functions.set(name, node);
+
+        if (name === 'main') {
+          mainFunction = node;
+        }
+      }
+
+      // Don't traverse inside function bodies for other function definitions (C++ doesn't support nested functions)
+      // But we need to traverse other top-level nodes (namespaces, etc. if we supported them)
+      // For this simple parser, just checking top-level children of translation_unit or similar is usually enough
+      // But let's be safe and traverse everything except function bodies
+    };
+
+    // Simple top-level traversal for now
+    const root = tree.rootNode;
+    for (let i = 0; i < root.namedChildCount; i++) {
+      visit(root.namedChild(i));
+    }
+
+    return { functions, mainFunction };
+  }
+
+  getFunctionName(declarator) {
+    if (!declarator) return 'unknown';
+    if (declarator.type === 'function_declarator') {
+      const funcDecl = declarator.childForFieldName('declarator');
+      return funcDecl ? funcDecl.text : 'unknown';
+    }
+    return declarator.text;
   }
 
   /**
@@ -87,9 +133,9 @@ class ParserService {
     const walk = () => {
       const node = cursor.currentNode;
       const indent = '  '.repeat(depth);
-      
+
       console.log(`${indent}${node.type} [${node.startPosition.row}:${node.startPosition.column} - ${node.endPosition.row}:${node.endPosition.column}]`);
-      
+
       if (cursor.gotoFirstChild()) {
         depth++;
         do {

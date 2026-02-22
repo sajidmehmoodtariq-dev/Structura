@@ -1,16 +1,60 @@
-# React + Vite
+# Structura 🧬
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Structura is an interactive, web-based educational tool designed to visualize C++ code execution, memory management, and pointers in real-time. By parsing C++ into an Abstract Syntax Tree (AST) directly in the browser, Structura simulates execution steps to vividly display the Call Stack, dynamic Heap allocations, and pointer references, demystifying low-level programming concepts.
 
-Currently, two official plugins are available:
+## ✨ Features
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+- **Interactive Code Editor**: Write C++ code utilizing the integrated, highly-polished Monaco Editor with syntax highlighting and active-line tracking.
+- **Browser-Based AST Parsing**: Leverages `web-tree-sitter` (via WebAssembly) to parse C++ code accurately into an AST entirely on the client side.
+- **Custom Execution Engine**: A deeply custom JavaScript interpreter that simulates C++ conditionals, loops, scopes, heap allocations (`new`), array decay, and pointer arithmetic without needing a real C++ compiler backend.
+- **Visual Memory Layout**: Beautifully renders virtual stack frames and dynamic heap memory blocks in real-time.
+- **Dynamic Pointer Tracking**: Automatically calculates connection points between referencing memory cells and target cells to draw dynamic SVG arrows, making pointers easy to understand.
+- **Step-Through Debugging**: Step forward, step back, pause, and reset execution to understand the program's flow and memory mutation line-by-line.
 
-## React Compiler
+## 🛠️ Tech Stack
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **Frontend**: React 19, React Router v7
+- **Styling & Animation**: Tailwind CSS v4, Framer Motion
+- **Editor**: `@monaco-editor/react`
+- **AST Parsing**: `web-tree-sitter` (C++ WA)
+- **Build Tool**: Vite
 
-## Expanding the ESLint configuration
+## 🚀 Getting Started
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+### Prerequisites
+- Node.js (v18 or higher recommended)
+
+### Installation
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/sajidmehmoodtariq-dev/Structura.git
+   cd structura
+   ```
+
+2. Install the necessary dependencies:
+   ```bash
+   npm install
+   ```
+
+3. Start the development server:
+   ```bash
+   npm run dev
+   ```
+
+4. Open your browser and navigate to the URL provided by Vite (usually `http://localhost:5173`).
+
+## 🧠 How It Works under the Hood
+
+1. **Input**: The user enters C++ code into the Monaco Editor.
+2. **Parsing**: When play is clicked, `web-tree-sitter` parses the raw code into an Abstract Syntax Tree (AST).
+3. **Interpreting**: A custom `InterpreterService` (written in JS) walks the AST and unrolls the program flow into a sequential array of "Execution Steps."
+4. **Visualizing**: A loop inside the application steps through the execution array, dispatching actions to a custom `VisualizationContext`. This state manager updates the virtual `stack`, `heap`, and simulated `cout` console, automatically triggering UI re-renders to reflect memory visually.
+
+## 🚧 Current Status & Limitations
+
+- **MVP / Educational Sandox**: Structura handles basic C++ constructs efficiently (primitives, pointers, loops, conditionals, basic arrays, and heap allocation). Highly complex STL operations or advanced language features may fail the internal tree walker.
+- **AI Tutor Module**: The application currently presents a highly-polished UI for a "Gemini AI Tutor." Please note that in the current version, this feature is structurally mocked for UI demonstration purposes and does not invoke live LLM APIs.
+
+---
+*Built to make learning C++ pointers and memory management intuitive and visual.*

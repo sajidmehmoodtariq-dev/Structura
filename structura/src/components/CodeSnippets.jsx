@@ -317,6 +317,294 @@ int main() {
 }`
         }
       ]
+    },
+    dsa: {
+      title: 'DSA',
+      icon: '📊',
+      items: [
+        {
+          name: 'Linear Search',
+          code: `#include <iostream>
+using namespace std;
+
+int linearSearch(int arr[], int n, int key) {
+    for (int i = 0; i < n; i++) {
+        if (arr[i] == key) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int main() {
+    int arr[] = {10, 50, 30, 70, 80, 20};
+    int n = sizeof(arr) / sizeof(arr[0]);
+    int key = 30;
+    
+    int index = linearSearch(arr, n, key);
+    
+    if (index != -1) {
+        cout << "Element found at index: " << index << endl;
+    } else {
+        cout << "Element not found" << endl;
+    }
+    
+    return 0;
+}`
+        },
+        {
+          name: 'Binary Search',
+          code: `#include <iostream>
+using namespace std;
+
+int binarySearch(int arr[], int n, int key) {
+    int left = 0, right = n - 1;
+    while (left <= right) {
+        int mid = left + (right - left) / 2;
+        if (arr[mid] == key)
+            return mid;
+        if (arr[mid] < key)
+            left = mid + 1;
+        else
+            right = mid - 1;
+    }
+    return -1;
+}
+
+int main() {
+    int arr[] = {10, 20, 30, 40, 50, 60, 70};
+    int n = sizeof(arr) / sizeof(arr[0]);
+    int key = 40;
+    
+    int index = binarySearch(arr, n, key);
+    
+    if (index != -1) {
+        cout << "Element found at index: " << index << endl;
+    } else {
+        cout << "Element not found" << endl;
+    }
+    
+    return 0;
+}`
+        },
+        {
+          name: 'Bubble Sort',
+          code: `#include <iostream>
+using namespace std;
+
+void bubbleSort(int arr[], int n) {
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = 0; j < n - i - 1; j++) {
+            if (arr[j] > arr[j + 1]) {
+                int temp = arr[j];
+                arr[j] = arr[j + 1];
+                arr[j + 1] = temp;
+            }
+        }
+    }
+}
+
+int main() {
+    int arr[] = {64, 34, 25, 12, 22, 11, 90};
+    int n = sizeof(arr) / sizeof(arr[0]);
+    
+    bubbleSort(arr, n);
+    
+    cout << "Sorted array: ";
+    for (int i = 0; i < n; i++) {
+        cout << arr[i] << " ";
+    }
+    cout << endl;
+    
+    return 0;
+}`
+        },
+        {
+          name: 'Insertion Sort',
+          code: `#include <iostream>
+using namespace std;
+
+void insertionSort(int arr[], int n) {
+    for (int i = 1; i < n; i++) {
+        int key = arr[i];
+        int j = i - 1;
+        while (j >= 0 && arr[j] > key) {
+            arr[j + 1] = arr[j];
+            j = j - 1;
+        }
+        arr[j + 1] = key;
+    }
+}
+
+int main() {
+    int arr[] = {12, 11, 13, 5, 6};
+    int n = sizeof(arr) / sizeof(arr[0]);
+    
+    insertionSort(arr, n);
+    
+    cout << "Sorted array: ";
+    for (int i = 0; i < n; i++) {
+        cout << arr[i] << " ";
+    }
+    cout << endl;
+    
+    return 0;
+}`
+        },
+        {
+          name: 'Quick Sort',
+          code: `#include <iostream>
+using namespace std;
+
+int partition(int arr[], int low, int high) {
+    int pivot = arr[high];
+    int i = (low - 1);
+    for (int j = low; j <= high - 1; j++) {
+        if (arr[j] < pivot) {
+            i++;
+            int temp = arr[i];
+            arr[i] = arr[j];
+            arr[j] = temp;
+        }
+    }
+    int temp = arr[i + 1];
+    arr[i + 1] = arr[high];
+    arr[high] = temp;
+    return (i + 1);
+}
+
+void quickSort(int arr[], int low, int high) {
+    if (low < high) {
+        int pi = partition(arr, low, high);
+        quickSort(arr, low, pi - 1);
+        quickSort(arr, pi + 1, high);
+    }
+}
+
+int main() {
+    int arr[] = {10, 7, 8, 9, 1, 5};
+    int n = sizeof(arr) / sizeof(arr[0]);
+    
+    quickSort(arr, 0, n - 1);
+    
+    cout << "Sorted array: ";
+    for (int i = 0; i < n; i++) {
+        cout << arr[i] << " ";
+    }
+    cout << endl;
+    
+    return 0;
+}`
+        },
+        {
+          name: 'Merge Sort',
+          code: `#include <iostream>
+using namespace std;
+
+void merge(int arr[], int l, int m, int r) {
+    int n1 = m - l + 1;
+    int n2 = r - m;
+    
+    int* L = new int[n1];
+    int* R = new int[n2];
+    
+    for (int i = 0; i < n1; i++)
+        L[i] = arr[l + i];
+    for (int j = 0; j < n2; j++)
+        R[j] = arr[m + 1 + j];
+        
+    int i = 0, j = 0, k = l;
+    while (i < n1 && j < n2) {
+        if (L[i] <= R[j]) {
+            arr[k] = L[i];
+            i++;
+        } else {
+            arr[k] = R[j];
+            j++;
+        }
+        k++;
+    }
+    while (i < n1) {
+        arr[k] = L[i];
+        i++;
+        k++;
+    }
+    while (j < n2) {
+        arr[k] = R[j];
+        j++;
+        k++;
+    }
+    
+    delete[] L;
+    delete[] R;
+}
+
+void mergeSort(int arr[], int l, int r) {
+    if (l < r) {
+        int m = l + (r - l) / 2;
+        mergeSort(arr, l, m);
+        mergeSort(arr, m + 1, r);
+        merge(arr, l, m, r);
+    }
+}
+
+int main() {
+    int arr[] = {12, 11, 13, 5, 6, 7};
+    int n = sizeof(arr) / sizeof(arr[0]);
+    
+    mergeSort(arr, 0, n - 1);
+    
+    cout << "Sorted array: ";
+    for (int i = 0; i < n; i++) {
+        cout << arr[i] << " ";
+    }
+    cout << endl;
+    
+    return 0;
+}`
+        },
+        {
+          name: 'Recursive Factorial',
+          code: `#include <iostream>
+using namespace std;
+
+int factorial(int n) {
+    if (n <= 1) 
+        return 1;
+    return n * factorial(n - 1);
+}
+
+int main() {
+    int number = 5;
+    int result = factorial(number);
+    cout << "Factorial of " << number << " is " << result << endl;
+    return 0;
+}`
+        },
+        {
+          name: 'Simple Function Call',
+          code: `#include <iostream>
+using namespace std;
+
+int add(int a, int b) {
+    int sum = a + b;
+    return sum;
+}
+
+void greet() {
+    cout << "Hello from greet!" << endl;
+}
+
+int main() {
+    greet();
+    int x = 10;
+    int y = 20;
+    int result = add(x, y);
+    cout << "Result: " << result << endl;
+    return 0;
+}`
+        }
+      ]
     }
   };
 
@@ -365,8 +653,7 @@ int main() {
                     <span className="text-xs font-semibold text-white">{category.title}</span>
                   </div>
                   <svg
-                    className={`w-3 h-3 text-gray-500 transition-transform ${expandedCategory === key ? 'rotate-90' : ''
-                      }`}
+                    className={`w-3 h-3 text-gray-500 transition-transform ${expandedCategory === key ? 'rotate-90' : ''}`}
                     fill="currentColor"
                     viewBox="0 0 20 20"
                   >
@@ -387,8 +674,8 @@ int main() {
                         onClick={() => !snippet.disabled && onSelectSnippet(snippet.code)}
                         disabled={snippet.disabled}
                         className={`w-full px-6 py-2 text-left text-[11px] text-gray-300 hover:bg-[#161b22] hover:text-cyan-400 transition-colors border-l-2 ${snippet.disabled
-                            ? 'border-amber-500/[0.5] text-gray-600 cursor-not-allowed hover:bg-[#0d1117] hover:text-gray-600'
-                            : 'border-transparent hover:border-cyan-400'
+                          ? 'border-amber-500/[0.5] text-gray-600 cursor-not-allowed hover:bg-[#0d1117] hover:text-gray-600'
+                          : 'border-transparent hover:border-cyan-400'
                           }`}
                       >
                         <div className="font-mono">{snippet.name}</div>
