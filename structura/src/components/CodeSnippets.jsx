@@ -318,8 +318,123 @@ int main() {
         }
       ]
     },
-    dsa: {
-      title: 'DSA',
+    dataStructures: {
+      title: 'Data Structures',
+      icon: '🏗️',
+      items: [
+        {
+          name: 'Singly Linked List',
+          code: `#include <iostream>
+using namespace std;
+
+struct Node {
+    int data;
+    Node* next;
+};
+
+int main() {
+    Node* head = new Node(10);
+    Node* second = new Node(20);
+    Node* third = new Node(30);
+    
+    head->next = second;
+    second->next = third;
+    
+    return 0;
+}`
+        },
+        {
+          name: 'Stack (Array)',
+          code: `#include <iostream>
+using namespace std;
+
+int main() {
+    int stack[5] = {0, 0, 0, 0, 0};
+    int top = -1;
+    
+    // Push 10
+    top++;
+    stack[top] = 10;
+    
+    // Push 20
+    top++;
+    stack[top] = 20;
+    
+    // Push 30
+    top++;
+    stack[top] = 30;
+    
+    // Pop
+    int popped = stack[top];
+    top--;
+    
+    cout << "Popped: " << popped << endl;
+    
+    return 0;
+}`
+        },
+        {
+          name: 'Queue (Array)',
+          code: `#include <iostream>
+using namespace std;
+
+int main() {
+    int queue[5] = {0, 0, 0, 0, 0};
+    int front = 0;
+    int rear = -1;
+    
+    // Enqueue 10
+    rear++;
+    queue[rear] = 10;
+    
+    // Enqueue 20
+    rear++;
+    queue[rear] = 20;
+    
+    // Enqueue 30
+    rear++;
+    queue[rear] = 30;
+    
+    // Dequeue
+    int dequeued = queue[front];
+    front++;
+    
+    cout << "Dequeued: " << dequeued << endl;
+    
+    return 0;
+}`
+        },
+        {
+          name: 'Two-Node Swap',
+          code: `#include <iostream>
+using namespace std;
+
+struct Node {
+    int data;
+    Node* next;
+};
+
+int main() {
+    Node* a = new Node(1);
+    Node* b = new Node(2);
+    
+    a->next = b;
+    
+    // Swap data
+    int temp = a->data;
+    a->data = b->data;
+    b->data = temp;
+    
+    cout << "a: " << a->data << endl;
+    cout << "b: " << b->data << endl;
+    
+    return 0;
+}`
+        }
+      ]
+    },
+    algorithms: {
+      title: 'Algorithms',
       icon: '📊',
       items: [
         {
@@ -601,6 +716,60 @@ int main() {
     int y = 20;
     int result = add(x, y);
     cout << "Result: " << result << endl;
+    return 0;
+}`
+        },
+        {
+          name: 'Fibonacci (Recursive)',
+          code: `#include <iostream>
+using namespace std;
+
+int fibonacci(int n) {
+    if (n <= 0)
+        return 0;
+    if (n == 1)
+        return 1;
+    return fibonacci(n - 1) + fibonacci(n - 2);
+}
+
+int main() {
+    int num = 5;
+    int result = fibonacci(num);
+    cout << "Fibonacci(" << num << ") = " << result << endl;
+    return 0;
+}`
+        },
+        {
+          name: 'Selection Sort',
+          code: `#include <iostream>
+using namespace std;
+
+void selectionSort(int arr[], int n) {
+    for (int i = 0; i < n - 1; i++) {
+        int min_idx = i;
+        for (int j = i + 1; j < n; j++) {
+            if (arr[j] < arr[min_idx]) {
+                min_idx = j;
+            }
+        }
+        int temp = arr[min_idx];
+        arr[min_idx] = arr[i];
+        arr[i] = temp;
+    }
+}
+
+int main() {
+    int arr[] = {64, 25, 12, 22, 11};
+    int n = sizeof(arr) / sizeof(arr[0]);
+    
+    selectionSort(arr, n);
+    
+    cout << "Sorted array: ";
+    for (int i = 0; i < n; i++) {
+        cout << arr[i] << " ";
+    }
+    cout << endl;
+    
     return 0;
 }`
         }

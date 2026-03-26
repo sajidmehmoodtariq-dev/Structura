@@ -3,6 +3,9 @@
  * Maps C++ syntax tree nodes to memory visualization actions
  */
 
+const MAX_TOTAL_STEPS = 300;
+const MAX_ANALYSIS_TIME_MS = 3000; // Hard 3-second wall clock limit
+
 class InterpreterService {
   constructor(visualizationActions, getStateFunction = null) {
     this.vizActions = visualizationActions;
@@ -20,6 +23,7 @@ class InterpreterService {
     this.callStack = []; // Runtime call stack for variable scoping
     this.lastReturnValue = null; // Store return value from function calls
     this.isReturning = false; // Flag to indicate early return from function
+    this.analysisReturned = false; // Flag to skip statements after return during static analysis
   }
   /**
    * Generate a mock memory address
@@ -62,6 +66,7 @@ class InterpreterService {
     this.variableAddresses.clear();
     this.functionMap.clear();
     this.arraySizes.clear();
+    this.analysisStartTime = performance.now(); // Start timer for time-based bailout
 
     // Import parser service to extract functions
     // We assume parserService is available or imported. 
@@ -159,6 +164,7 @@ class InterpreterService {
    */
   analyzeFunctionBody(bodyNode) {
     for (let i = 0; i < bodyNode.namedChildCount; i++) {
+      if (this.analysisReturned || this.executionSteps.length >= MAX_TOTAL_STEPS) break;
       const child = bodyNode.namedChild(i);
       this.analyzeStatement(child);
     }
@@ -168,6 +174,13 @@ class InterpreterService {
    * Analyze a statement
    */
   analyzeStatement(node) {
+    // Safety: stop generating steps if we've hit the limit or time budget
+    if (this.executionSteps.length >= MAX_TOTAL_STEPS) return;
+    if (performance.now() - this.analysisStartTime > MAX_ANALYSIS_TIME_MS) {
+      console.warn('⚠️ Analysis time limit exceeded');
+      return;
+    }
+
     switch (node.type) {
       case 'declaration':
         this.analyzeDeclaration(node);
@@ -484,8 +497,15 @@ class InterpreterService {
     console.log(`Analyzing Call: ${functionName}`);
 
     // Check recursion limit
-    if (this.callDepth > 20) {
+    if (this.callDepth > 10) {
       console.warn('⚠️ Max recursion depth reached');
+      return;
+    }
+
+    // Check total step limit
+    if (this.executionSteps.length >= MAX_TOTAL_STEPS || 
+        performance.now() - this.analysisStartTime > MAX_ANALYSIS_TIME_MS) {
+      console.warn('⚠️ Analysis budget exceeded during function call');
       return;
     }
 
@@ -521,6 +541,11 @@ class InterpreterService {
     });
 
     this.callDepth++;
+
+    // Save analysis variables and return flag before entering function scope
+    const savedAnalysisVars = new Map(this.analysisVariables);
+    const savedAnalysisReturned = this.analysisReturned;
+    this.analysisReturned = false;
 
     // Process Function Parameter Mapping
     // mapped to argument values
@@ -569,6 +594,10 @@ class InterpreterService {
     }
 
     this.callDepth--;
+    
+    // Restore analysis variables and return flag from before the call
+    this.analysisVariables = savedAnalysisVars;
+    this.analysisReturned = savedAnalysisReturned;
 
     // Exit step
     this.executionSteps.push({
@@ -851,16 +880,90 @@ class InterpreterService {
    */
   analyzeReturnStatement(node) {
     let returnValue = null;
+    let returnExpr = null;
+    
     if (node.namedChildCount > 0) {
       const expr = node.namedChild(0);
-      returnValue = this.evaluateExpression(expr, true);
+      
+      // Check if the expression contains function calls that need unrolling
+      const callNodes = this.findCallExpressions(expr);
+      
+      if (callNodes.length > 0) {
+        // Unroll each function call first, storing results in temp variables
+        // For `return n * factorial(n - 1)`:
+        //   1. Execute factorial(n-1) → result in __temp_ret_0
+        //   2. RETURN step that computes n * __temp_ret_0 at runtime
+        
+        for (let ci = 0; ci < callNodes.length; ci++) {
+          const callNode = callNodes[ci];
+          const tempVarName = `__ret_temp_${this.callDepth}_${ci}`;
+          
+          // Declare temp variable
+          const tempAddr = this.generateAddress();
+          this.executionSteps.push({
+            type: 'SET_VARIABLE',
+            line: node.startPosition.row + 1,
+            data: {
+              name: tempVarName,
+              value: '?',
+              type: 'int',
+              address: tempAddr,
+              isTemp: true  // Mark as temporary (hidden from viz)
+            }
+          });
+          
+          // Unroll the function call, assigning result to temp var
+          this.analyzeFunctionCall(callNode, tempVarName);
+        }
+        
+        // Build runtime expression that replaces call_expression text with temp var names
+        let exprText = expr.text;
+        for (let ci = 0; ci < callNodes.length; ci++) {
+          const callNode = callNodes[ci];
+          const tempVarName = `__ret_temp_${this.callDepth}_${ci}`;
+          exprText = exprText.replace(callNode.text, tempVarName);
+        }
+        
+        returnExpr = exprText;
+        returnValue = exprText; // Will be resolved at runtime
+      } else {
+        returnValue = this.evaluateExpression(expr, true);
+        if (typeof returnValue !== 'number') {
+          returnExpr = expr.text;
+        }
+      }
     }
 
     this.executionSteps.push({
       type: 'RETURN',
       line: node.startPosition.row + 1,
-      data: { value: returnValue }
+      data: { value: returnValue, expression: returnExpr }
     });
+
+    // Signal that this scope has returned - skip remaining statements
+    if (this.callDepth > 0) {
+      this.analysisReturned = true;
+    }
+  }
+  
+  /**
+   * Find all call_expression nodes within an AST node (non-recursive traversal)
+   */
+  findCallExpressions(node) {
+    const results = [];
+    const stack = [node];
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (current.type === 'call_expression') {
+        results.push(current);
+        // Don't descend into call_expression children (nested calls are handled by unrolling)
+        continue;
+      }
+      for (let i = current.namedChildCount - 1; i >= 0; i--) {
+        stack.push(current.namedChild(i));
+      }
+    }
+    return results;
   }
 
   /**
@@ -873,7 +976,25 @@ class InterpreterService {
 
     // Evaluate condition statically to guide state tracking
     const conditionResult = this.evaluateCondition(condition);
-    console.log(`🧠 IF Check: "${condition?.text}" -> ${conditionResult}`);
+    console.log(`🧠 IF Check: "${condition?.text}" -> ${conditionResult} (callDepth: ${this.callDepth})`);
+    
+    // When inside a function call (recursion), use static analysis to only unroll
+    // the taken branch. This prevents exponential blowup during recursive unrolling.
+    if (this.callDepth > 0 && conditionResult !== null && conditionResult !== undefined) {
+      if (conditionResult) {
+        // Only analyze true branch
+        if (consequence) {
+          this.analyzeCompoundOrStatement(consequence);
+        }
+      } else {
+        // Only analyze false branch
+        if (alternative) {
+          this.analyzeCompoundOrStatement(alternative);
+        }
+      }
+      return;
+    }
+    
     // Snapshot state before branches
     const preBranchState = new Map(this.analysisVariables);
 
@@ -1054,6 +1175,8 @@ class InterpreterService {
     const MAX_ITERATIONS = 10;
 
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+      if (this.executionSteps.length >= MAX_TOTAL_STEPS || 
+          performance.now() - this.analysisStartTime > MAX_ANALYSIS_TIME_MS) break;
       const conditionResult = this.evaluateCondition(condition);
 
       this.executionSteps.push({
@@ -1103,6 +1226,8 @@ class InterpreterService {
     const MAX_ITERATIONS = 10;
 
     for (let iteration = 0; iteration < MAX_ITERATIONS; iteration++) {
+      if (this.executionSteps.length >= MAX_TOTAL_STEPS || 
+          performance.now() - this.analysisStartTime > MAX_ANALYSIS_TIME_MS) break;
       // Check condition
       const conditionResult = condition ? this.evaluateCondition(condition) : true;
 
@@ -1154,6 +1279,7 @@ class InterpreterService {
   analyzeCompoundOrStatement(node) {
     if (node.type === 'compound_statement') {
       for (let i = 0; i < node.namedChildCount; i++) {
+        if (this.analysisReturned || this.executionSteps.length >= MAX_TOTAL_STEPS) break;
         this.analyzeStatement(node.namedChild(i));
       }
     } else {
@@ -1658,19 +1784,22 @@ class InterpreterService {
 
       case 'PARAM_INIT':
         // Initialize parameter in current scope
-        this.runtimeVariables.set(step.data.name, {
-          value: step.data.value,
-          type: step.data.type,
-          address: this.generateAddress()
-        });
+        {
+          const paramAddr = this.generateAddress();
+          this.runtimeVariables.set(step.data.name, {
+            value: step.data.value,
+            type: step.data.type,
+            address: paramAddr
+          });
 
-        // Also update UI
-        this.vizActions.setVariable(
-          step.data.name,
-          step.data.value,
-          step.data.type,
-          this.generateAddress()
-        );
+          // Also update UI
+          this.vizActions.setVariable(
+            step.data.name,
+            step.data.value,
+            step.data.type,
+            paramAddr
+          );
+        }
         break;
 
       case 'RETURN_FROM_CALL':
@@ -1692,13 +1821,15 @@ class InterpreterService {
               value: this.lastReturnValue
             });
 
-            // Update Visualization
-            this.vizActions.setVariable(
-              targetVarName,
-              this.lastReturnValue,
-              existingVar.type,
-              existingVar.address
-            );
+            // Update Visualization (skip temp variables)
+            if (!targetVarName.startsWith('__ret_temp_')) {
+              this.vizActions.setVariable(
+                targetVarName,
+                this.lastReturnValue,
+                existingVar.type,
+                existingVar.address
+              );
+            }
 
             console.log(`↩️ Assigned return value ${this.lastReturnValue} to ${targetVarName}`);
           }
@@ -1727,12 +1858,15 @@ class InterpreterService {
           address: step.data.address
         });
 
-        this.vizActions.setVariable(
-          step.data.name,
-          finalValue,
-          step.data.type,
-          step.data.address
-        );
+        // Don't show temp variables in visualization
+        if (!step.data.isTemp) {
+          this.vizActions.setVariable(
+            step.data.name,
+            finalValue,
+            step.data.type,
+            step.data.address
+          );
+        }
         break;
 
       case 'LOG_OUTPUT':
@@ -1891,7 +2025,43 @@ class InterpreterService {
           console.log('🔍 Final output text:', outputText);
         }
 
+        // Fallback: resolve any remaining {varName} placeholders from runtimeVariables
+        // (handles cases where viz state is stale due to async React updates)
+        if (outputText.includes('{')) {
+          outputText = outputText.replace(/\{(\w+)\}/g, (match, varName) => {
+            const varData = this.runtimeVariables.get(varName);
+            if (varData && varData.value !== undefined && varData.value !== '?') {
+              return String(varData.value);
+            }
+            return match;
+          });
+        }
+
         this.vizActions.logOutput(outputText);
+        break;
+
+      case 'UPDATE_ARRAY_ELEMENT':
+        // Update a specific array element at runtime
+        {
+          const arrData = this.runtimeVariables.get(step.data.arrayName);
+          if (arrData && Array.isArray(arrData.value)) {
+            const newArray = [...arrData.value];
+            const idx = typeof step.data.index === 'number' ? step.data.index : parseInt(step.data.index);
+            if (idx >= 0 && idx < newArray.length) {
+              newArray[idx] = step.data.value;
+              this.runtimeVariables.set(step.data.arrayName, {
+                ...arrData,
+                value: newArray
+              });
+              this.vizActions.setVariable(
+                step.data.arrayName,
+                newArray,
+                arrData.type,
+                arrData.address
+              );
+            }
+          }
+        }
         break;
 
       case 'UPDATE_VARIABLE':
@@ -2135,13 +2305,130 @@ class InterpreterService {
 
       case 'RETURN':
         // Store return value for the caller
-        if (step.data.value !== undefined) {
+        if (step.data.expression) {
+          // Expression couldn't be resolved at analysis time — evaluate at runtime
+          const resolved = this.evaluateRuntimeExpression(step.data.expression);
+          this.lastReturnValue = resolved;
+
+          // Build human-readable expression for display
+          let displayExpr = step.data.expression;
+          // Replace __ret_temp_X_Y with their resolved values
+          displayExpr = displayExpr.replace(/__ret_temp_\d+_\d+/g, (match) => {
+            const vd = this.runtimeVariables.get(match);
+            return vd ? String(vd.value) : match;
+          });
+          // Replace remaining variable names with their current values
+          displayExpr = displayExpr.replace(/\b([a-zA-Z_]\w*)\b/g, (match) => {
+            if (match.startsWith('__')) return match;
+            const vd = this.runtimeVariables.get(match);
+            return vd !== undefined ? String(vd.value) : match;
+          });
+
+          // Show return value in frame (expression stored in address field for display)
+          this.vizActions.setVariable('__return__', resolved, '__return__', displayExpr);
+          console.log(`🔙 RETURN: Runtime-evaluated "${step.data.expression}" = ${resolved} (display: ${displayExpr})`);
+        } else if (step.data.value !== undefined) {
           this.lastReturnValue = step.data.value;
+          // Show simple return value in frame
+          this.vizActions.setVariable('__return__', this.lastReturnValue, '__return__', null);
           console.log(`🔙 RETURN: Captured value ${this.lastReturnValue}`);
         }
         this.isReturning = true;
         break;
     }
+  }
+
+  /**
+   * Evaluate an expression string at runtime using runtimeVariables.
+   * Handles: numeric literals, variable names, binary operations (+, -, *, /, %).
+   * Example: "n * __ret_temp_1_0" with runtimeVariables {n: 5, __ret_temp_1_0: 24} => 120
+   */
+  evaluateRuntimeExpression(exprStr) {
+    if (!exprStr) return 0;
+    exprStr = exprStr.trim();
+    
+    // Try as a number literal first
+    const numVal = Number(exprStr);
+    if (!isNaN(numVal) && exprStr !== '') return numVal;
+    
+    // Try as a single variable
+    if (/^[\w]+$/.test(exprStr)) {
+      const varData = this.runtimeVariables.get(exprStr);
+      if (varData !== undefined) {
+        return typeof varData.value === 'number' ? varData.value : varData.value;
+      }
+      // Could be a literal that's not a number (shouldn't happen for int returns)
+      return 0;
+    }
+    
+    // Handle parenthesized expression
+    if (exprStr.startsWith('(') && exprStr.endsWith(')')) {
+      // Find matching close paren
+      let depth = 0;
+      let isWrapped = true;
+      for (let i = 0; i < exprStr.length; i++) {
+        if (exprStr[i] === '(') depth++;
+        if (exprStr[i] === ')') depth--;
+        if (depth === 0 && i < exprStr.length - 1) {
+          isWrapped = false;
+          break;
+        }
+      }
+      if (isWrapped) {
+        return this.evaluateRuntimeExpression(exprStr.slice(1, -1));
+      }
+    }
+    
+    // Find the lowest-precedence binary operator (right-to-left for + and -)
+    // to correctly split "a + b * c" into "a" + "b * c"
+    const findSplitPoint = (str, ops) => {
+      let depth = 0;
+      for (let i = str.length - 1; i >= 0; i--) {
+        if (str[i] === ')') depth++;
+        if (str[i] === '(') depth--;
+        if (depth === 0) {
+          for (const op of ops) {
+            if (str.substring(i, i + op.length) === op) {
+              // Make sure it's not part of a negative number or identifier
+              const before = str.substring(0, i).trim();
+              if (before.length > 0) {
+                return { index: i, op };
+              }
+            }
+          }
+        }
+      }
+      return null;
+    };
+    
+    // Try low-precedence operators first: +, -
+    let split = findSplitPoint(exprStr, ['+', '-']);
+    if (split) {
+      const left = this.evaluateRuntimeExpression(exprStr.substring(0, split.index));
+      const right = this.evaluateRuntimeExpression(exprStr.substring(split.index + split.op.length));
+      if (typeof left === 'number' && typeof right === 'number') {
+        return split.op === '+' ? left + right : left - right;
+      }
+      return `${left} ${split.op} ${right}`;
+    }
+    
+    // Try high-precedence: *, /, %
+    split = findSplitPoint(exprStr, ['*', '/', '%']);
+    if (split) {
+      const left = this.evaluateRuntimeExpression(exprStr.substring(0, split.index));
+      const right = this.evaluateRuntimeExpression(exprStr.substring(split.index + split.op.length));
+      if (typeof left === 'number' && typeof right === 'number') {
+        switch (split.op) {
+          case '*': return left * right;
+          case '/': return right !== 0 ? Math.floor(left / right) : 0;
+          case '%': return right !== 0 ? left % right : 0;
+        }
+      }
+      return `${left} ${split.op} ${right}`;
+    }
+    
+    console.warn(`⚠️ evaluateRuntimeExpression: Could not evaluate "${exprStr}"`);
+    return exprStr;
   }
 
   /**

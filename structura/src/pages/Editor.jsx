@@ -32,8 +32,36 @@ int main() {
   const [isPaused, setIsPaused] = useState(false);
   const [aiTutorOpen, setAiTutorOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [arrayAnimState, setArrayAnimState] = useState({ swap: null });
+  const lastArrayUpdateRef = useRef(null);
+  const swapClearTimerRef = useRef(null);
   const editorRef = useRef(null);
   const decorationsRef = useRef([]);
+
+  // Detect swap pairs from consecutive UPDATE_ARRAY_ELEMENT steps
+  const detectAndUpdateArrayAnim = (step) => {
+    if (!step) return;
+
+    if (step.type === 'UPDATE_ARRAY_ELEMENT') {
+      const prev = lastArrayUpdateRef.current;
+      lastArrayUpdateRef.current = { ...step.data };
+
+      // Two consecutive updates to same array with different indices = swap
+      if (prev && prev.arrayName === step.data.arrayName && prev.index !== step.data.index) {
+        // Clear any pending timer
+        if (swapClearTimerRef.current) clearTimeout(swapClearTimerRef.current);
+        setArrayAnimState({ swap: { arrayName: step.data.arrayName, pair: [prev.index, step.data.index] } });
+        // Clear swap highlight after animation completes
+        swapClearTimerRef.current = setTimeout(() => {
+          setArrayAnimState(prev => ({ ...prev, swap: null }));
+        }, 700);
+        lastArrayUpdateRef.current = null; // Reset so we don't chain
+        return;
+      }
+    } else {
+      lastArrayUpdateRef.current = null;
+    }
+  };
 
   const highlightLine = (lineNumber) => {
     if (editorRef.current) {
@@ -63,29 +91,53 @@ int main() {
       return;
     }
 
-    try {
-      const tree = parserService.parseCode(code);
-      setParseError(null);
+    // Show loading state immediately
+    setIsPlaying(true);
+    vizActions.setStatus('RUNNING');
 
-      // Generate steps from AST using interpreter
-      if (interpreterRef.current) {
-        const steps = interpreterRef.current.generateSteps(tree);
-        setTotalSteps(steps.length);
-        console.log('📊 Execution Plan:', steps);
+    // Defer heavy analysis to next tick so the UI can update first
+    setTimeout(() => {
+      try {
+        const tree = parserService.parseCode(code);
+        setParseError(null);
 
-        // Execute the steps
-        executeStepsWithVisualization(steps);
+        if (interpreterRef.current) {
+          const t0 = performance.now();
+          const steps = interpreterRef.current.generateSteps(tree);
+          console.log(`📊 Execution Plan: ${steps.length} steps (analyzed in ${(performance.now() - t0).toFixed(0)}ms)`);
+          setTotalSteps(steps.length);
+
+          executeStepsWithVisualization(steps);
+        }
+      } catch (error) {
+        console.error('Parse error:', error);
+        setParseError(error.message);
+        setIsPlaying(false);
+        vizActions.setStatus('ERROR');
       }
-
-    } catch (error) {
-      console.error('Parse error:', error);
-      setParseError(error.message);
-    }
+    }, 16); // One frame delay to let React render loading state
   };
 
   const stepsRef = useRef([]);
   const executionControlRef = useRef({ shouldStop: false, isPaused: false });
   const skipBranchesRef = useRef(new Map());
+  const stepsGenerationTimerRef = useRef(null);
+
+  // Pre-generate steps from current code (deferred to avoid blocking UI)
+  const generateStepsFromCode = (codeStr) => {
+    if (stepsGenerationTimerRef.current) clearTimeout(stepsGenerationTimerRef.current);
+    stepsGenerationTimerRef.current = setTimeout(() => {
+      if (!interpreterRef.current || !parserReady) return;
+      try {
+        const tree = parserService.parseCode(codeStr);
+        const steps = interpreterRef.current.generateSteps(tree);
+        stepsRef.current = steps;
+        setTotalSteps(steps.length);
+      } catch (e) {
+        console.warn('Step pre-generation failed:', e.message);
+      }
+    }, 300);
+  };
 
   const executeStepsWithVisualization = async (steps) => {
     if (!interpreterRef.current) return;
@@ -193,8 +245,12 @@ int main() {
       // Execute the step
       await interpreterRef.current.executeStep(step);
 
-      // Wait before next step
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // Detect array swap animations
+      detectAndUpdateArrayAnim(step);
+
+      // Adaptive delay: faster for programs with more steps
+      const delay = steps.length > 200 ? 150 : steps.length > 100 ? 300 : steps.length > 50 ? 500 : 800;
+      await new Promise(resolve => setTimeout(resolve, delay));
     }
 
     // Don't clear - leave stack visible for user to see
@@ -228,10 +284,21 @@ int main() {
     setIsPaused(false);
     highlightLine(0);
     vizActions.setStatus('IDLE');
+    setArrayAnimState({ swap: null });
+    lastArrayUpdateRef.current = null;
   };
 
   const handleStepForward = async () => {
     if (!interpreterRef.current || !parserReady) return;
+
+    // If auto-playing, stop it and switch to manual stepping
+    if (isPlaying) {
+      executionControlRef.current.shouldStop = true;
+      executionControlRef.current.isPaused = false;
+      setIsPlaying(false);
+      setIsPaused(false);
+      // Steps and state are already up to date, just continue from currentStep
+    }
 
     // Generate steps if not already done
     if (stepsRef.current.length === 0) {
@@ -293,6 +360,9 @@ int main() {
     setCurrentStep(nextStep + 1);
     await interpreterRef.current.executeStep(step);
 
+    // Detect array swap animations
+    detectAndUpdateArrayAnim(step);
+
     // If this was the last step
     if (nextStep + 1 >= stepsRef.current.length) {
       vizActions.setStatus('COMPLETED');
@@ -302,6 +372,14 @@ int main() {
 
   const handleStepBack = async () => {
     if (currentStep <= 0 || !interpreterRef.current) return;
+
+    // If auto-playing, stop it and switch to manual stepping
+    if (isPlaying) {
+      executionControlRef.current.shouldStop = true;
+      executionControlRef.current.isPaused = false;
+      setIsPlaying(false);
+      setIsPaused(false);
+    }
 
     // Generate steps if not already done
     if (stepsRef.current.length === 0) {
@@ -433,6 +511,10 @@ int main() {
 
   const handleEditorChange = (value) => {
     setCode(value || '');
+    // Re-generate steps when code changes so step count stays accurate
+    stepsRef.current = [];
+    setCurrentStep(0);
+    generateStepsFromCode(value || '');
   };
 
   const handleSnippetSelect = (snippetCode) => {
@@ -442,6 +524,17 @@ int main() {
     setCurrentStep(0);
     stepsRef.current = [];
     highlightLine(0);
+    skipBranchesRef.current = new Map();
+    if (interpreterRef.current) {
+      interpreterRef.current.runtimeVariables = new Map();
+    }
+    setIsPlaying(false);
+    setIsPaused(false);
+    executionControlRef.current.shouldStop = true;
+    setArrayAnimState({ swap: null });
+    lastArrayUpdateRef.current = null;
+    // Pre-generate steps so forward/back work immediately
+    generateStepsFromCode(snippetCode);
   };
 
   const _handleParseClick = () => {
@@ -450,30 +543,6 @@ int main() {
 
   return (
     <div className="min-h-screen bg-[#0d1117] text-white relative">
-      {/* AI Tutor Overlay */}
-      <div className="absolute top-4 right-4 z-50">
-        <button
-          onClick={() => setAiTutorOpen(!aiTutorOpen)}
-          className="bg-linear-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 px-4 py-2 rounded-lg font-semibold shadow-lg transition-all flex items-center gap-2"
-        >
-          <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
-            <path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-3-3h6a3 3 0 01-3 3z" />
-          </svg>
-          Gemini Analysis
-        </button>
-        {aiTutorOpen && (
-          <div className="mt-2 bg-gray-900 border border-purple-500/30 rounded-lg p-4 shadow-2xl backdrop-blur-sm max-w-xs">
-            <div className="flex items-start gap-3">
-              <div className="w-2 h-2 bg-green-400 rounded-full mt-1 animate-pulse"></div>
-              <div>
-                <p className="text-sm font-semibold text-green-400 mb-1">Logic Check: Safe</p>
-                <p className="text-xs text-gray-300">No memory leaks detected. Pointer usage is correct.</p>
-              </div>
-            </div>
-          </div>
-        )}
-      </div>
-
       {/* Main Content - Sidebar + Editor + Visualization */}
       <div className="flex h-screen">
         {/* Code Snippets Sidebar */}
@@ -497,7 +566,32 @@ int main() {
               <div className="h-3 w-px bg-[#30363d]"></div>
               <span className="text-xs font-mono text-gray-300">main.cpp</span>
             </div>
-            <span className="text-[10px] text-gray-500 font-mono">C++17</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-gray-500 font-mono">C++17</span>
+              {/* Gemini Analysis Button */}
+              <div className="relative">
+                <button
+                  onClick={() => setAiTutorOpen(!aiTutorOpen)}
+                  className="bg-linear-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 px-2.5 py-1 rounded-md text-[11px] font-semibold shadow-lg transition-all flex items-center gap-1.5"
+                >
+                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
+                    <path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-3-3h6a3 3 0 01-3 3z" />
+                  </svg>
+                  Gemini
+                </button>
+                {aiTutorOpen && (
+                  <div className="absolute right-0 top-full mt-2 z-50 bg-gray-900 border border-purple-500/30 rounded-lg p-3 shadow-2xl backdrop-blur-sm w-64">
+                    <div className="flex items-start gap-2.5">
+                      <div className="w-2 h-2 bg-green-400 rounded-full mt-1 animate-pulse shrink-0"></div>
+                      <div>
+                        <p className="text-xs font-semibold text-green-400 mb-0.5">Logic Check: Safe</p>
+                        <p className="text-[11px] text-gray-300">No memory leaks detected. Pointer usage is correct.</p>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
 
           {/* Monaco Editor */}
@@ -531,7 +625,13 @@ int main() {
 
         {/* Right Side - Visualization Stage */}
         <div className="flex-[3] flex flex-col">
-          <MemoryVisualization vizState={vizState} />
+          <MemoryVisualization
+            vizState={vizState}
+            arrayAnimState={arrayAnimState}
+            steps={stepsRef.current}
+            currentStep={currentStep}
+            totalSteps={totalSteps}
+          />
           <ControlPanel
             currentStep={currentStep}
             totalSteps={totalSteps}

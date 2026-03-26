@@ -1,9 +1,25 @@
 import React, { useMemo, useState } from 'react';
 import PointerArrow from './PointerArrow';
 import HeapBlock from './HeapBlock';
+import ArrayCanvas from './ArrayCanvas';
+import RecursionTreeCanvas from './RecursionTreeCanvas';
 
-const MemoryVisualization = ({ vizState }) => {
+// Variable names that are commonly used as array indices in sorting/search algorithms
+const INDEX_VAR_NAMES = new Set([
+  'i', 'j', 'k', 'l', 'p', 'q',
+  'low', 'high', 'mid', 'left', 'right',
+  'start', 'end', 'pivot', 'min_idx', 'max_idx',
+  'minIdx', 'maxIdx', 'lo', 'hi',
+]);
+
+const VIZ_MODES = [
+  { key: 'stack-heap', label: 'Stack & Heap', icon: '⬛' },
+  { key: 'recursion-tree', label: 'Recursion Tree', icon: '🌳' },
+];
+
+const MemoryVisualization = ({ vizState, arrayAnimState = {}, steps = [], currentStep = 0, totalSteps: _totalSteps = 0 }) => {
   const [hoveredVar, setHoveredVar] = useState(null);
+  const [vizMode, setVizMode] = useState('stack-heap');
 
   // Calculate all arrows
   const arrows = useMemo(() => {
@@ -93,14 +109,41 @@ const MemoryVisualization = ({ vizState }) => {
   return (
     <div className="flex-1 bg-[#0d1117] flex flex-col overflow-hidden font-sans">
       {/* Header */}
-      <div className="bg-[#161b22] border-b border-[#30363d] px-2 py-1.5 flex justify-between items-center">
-        <div>
+      <div className="bg-[#161b22] border-b border-[#30363d] px-2 py-1.5 flex items-center gap-3">
+        <div className="mr-auto">
           <h2 className="text-xs font-bold text-white">Memory Visualization</h2>
-          <p className="text-[10px] text-gray-500 mt-0.5">Real-time Stack & Heap</p>
+          <p className="text-[10px] text-gray-500 mt-0.5">
+            {vizMode === 'stack-heap' ? 'Real-time Stack & Heap' : 'Recursive Call Tree'}
+          </p>
+        </div>
+
+        {/* Viz Mode Toggle Buttons */}
+        <div className="flex rounded-md border border-[#30363d] overflow-hidden">
+          {VIZ_MODES.map(mode => (
+            <button
+              key={mode.key}
+              onClick={() => setVizMode(mode.key)}
+              className={`px-2.5 py-1 text-[10px] font-mono transition-colors flex items-center gap-1.5 ${
+                vizMode === mode.key
+                  ? 'bg-cyan-500/15 text-cyan-400 border-r border-cyan-500/30'
+                  : 'bg-[#0d1117] text-gray-500 hover:text-gray-300 hover:bg-[#161b22] border-r border-[#30363d]'
+              } last:border-r-0`}
+              title={mode.label}
+            >
+              <span className="text-xs">{mode.icon}</span>
+              <span className="hidden sm:inline">{mode.label}</span>
+            </button>
+          ))}
         </div>
       </div>
 
+      {/* Recursion Tree View */}
+      {vizMode === 'recursion-tree' && (
+        <RecursionTreeCanvas steps={steps} currentStep={currentStep} />
+      )}
+
       {/* Memory Layout with Arrow Container */}
+      {vizMode === 'stack-heap' && (
       <div id="arrow-container" className="flex-1 flex overflow-hidden relative">
         {/* Stack Memory Zone - 40% width (reduced to give more space to heap) */}
         <div className="w-[40%] bg-[#161b22] border-r border-[#30363d] p-2 overflow-y-auto flex flex-col gap-2 relative z-10 shadow-xl shadow-black/20">
@@ -124,6 +167,7 @@ const MemoryVisualization = ({ vizState }) => {
                   frame={frame}
                   frameIdx={frameIdx}
                   onHoverVar={setHoveredVar}
+                  arrayAnimState={arrayAnimState}
                 />
               ))}
             </div>
@@ -178,11 +222,42 @@ const MemoryVisualization = ({ vizState }) => {
           ))}
         </svg>
       </div>
+      )}
     </div>
   );
 };
 
-const StackFrame = ({ frame, frameIdx, onHoverVar }) => {
+const StackFrame = ({ frame, frameIdx, onHoverVar, arrayAnimState = {} }) => {
+  // Derive pointer badges: detect which integer vars are array indices
+  const arrayPointers = useMemo(() => {
+    const pointers = {}; // { arrayName: { varLabel: index } }
+    const arrays = {};
+    const intVars = {};
+
+    // Separate arrays from integer variables
+    Object.entries(frame.variables).forEach(([name, varData]) => {
+      if (name === '__return__') return;
+      if (Array.isArray(varData.value)) {
+        arrays[name] = varData.value.length;
+        pointers[name] = {};
+      } else if (typeof varData.value === 'number' && INDEX_VAR_NAMES.has(name)) {
+        intVars[name] = varData.value;
+      }
+    });
+
+    // Assign integer vars to matching arrays (value must be within bounds)
+    Object.entries(intVars).forEach(([varName, val]) => {
+      Object.entries(arrays).forEach(([arrName, arrLen]) => {
+        if (val >= 0 && val < arrLen) {
+          if (!pointers[arrName]) pointers[arrName] = {};
+          pointers[arrName][varName] = val;
+        }
+      });
+    });
+
+    return pointers;
+  }, [frame.variables]);
+
   return (
     <div
       className="bg-linear-to-br from-indigo-950/[0.4] to-purple-950/[0.2] rounded-md border border-indigo-500/[0.3] overflow-hidden shadow-sm hover:shadow-indigo-500/10 transition-shadow duration-300"
@@ -198,7 +273,7 @@ const StackFrame = ({ frame, frameIdx, onHoverVar }) => {
 
       {/* Variables */}
       <div className="p-2.5">
-        {Object.entries(frame.variables).length === 0 ? (
+        {Object.entries(frame.variables).filter(([n]) => n !== '__return__').length === 0 && !frame.variables.__return__ ? (
           <div className="text-[10px] text-gray-600 italic text-center py-2">
             No variables
           </div>
@@ -207,7 +282,7 @@ const StackFrame = ({ frame, frameIdx, onHoverVar }) => {
             {/* Regular variables - horizontal wrap */}
             <div className="flex flex-wrap gap-2 mb-2">
               {Object.entries(frame.variables)
-                .filter(([, varData]) => !Array.isArray(varData.value))
+                .filter(([name, varData]) => name !== '__return__' && !Array.isArray(varData.value))
                 .map(([name, varData]) => (
                   <RegularVariable
                     key={name}
@@ -218,20 +293,30 @@ const StackFrame = ({ frame, frameIdx, onHoverVar }) => {
                   />
                 ))}
             </div>
-            {/* Arrays - full width, stacked */}
+            {/* Arrays - full width, stacked, using animated ArrayCanvas */}
             <div className="space-y-2">
               {Object.entries(frame.variables)
-                .filter(([, varData]) => Array.isArray(varData.value))
-                .map(([name, varData]) => (
-                  <ArrayVariable
-                    key={name}
-                    name={name}
-                    varData={varData}
-                    onHover={() => onHoverVar(name)}
-                    onLeave={() => onHoverVar(null)}
-                  />
-                ))}
+                .filter(([name, varData]) => name !== '__return__' && Array.isArray(varData.value))
+                .map(([name, varData]) => {
+                  const swapInfo = arrayAnimState.swap;
+                  const swapPair = (swapInfo && swapInfo.arrayName === name) ? swapInfo.pair : null;
+                  return (
+                    <ArrayCanvas
+                      key={name}
+                      name={name}
+                      varData={varData}
+                      pointers={arrayPointers[name] || {}}
+                      swapPair={swapPair}
+                      onHover={() => onHoverVar(name)}
+                      onLeave={() => onHoverVar(null)}
+                    />
+                  );
+                })}
             </div>
+            {/* Return value indicator */}
+            {frame.variables.__return__ && (
+              <ReturnValue varData={frame.variables.__return__} />
+            )}
           </>
         )}
       </div>
@@ -239,47 +324,21 @@ const StackFrame = ({ frame, frameIdx, onHoverVar }) => {
   );
 };
 
-const ArrayVariable = ({ name, varData, onHover, onLeave }) => {
+const ReturnValue = ({ varData }) => {
+  const expression = varData.address; // expression stored in address field
   return (
-    <div
-      className="relative group"
-      onMouseEnter={onHover}
-      onMouseLeave={onLeave}
-    >
-      <div className="bg-[#0d1117]/80 rounded border border-[#30363d] p-1.5 hover:border-amber-500/30 transition-colors">
-        {/* Array Header */}
-        <div className="flex items-center gap-1.5 mb-1.5">
-          <span className="text-[8px] font-mono text-amber-400 bg-amber-950/[0.5] px-1.5 py-0.5 rounded font-semibold border border-amber-900/50">
-            {varData.type}
-          </span>
-          <span className="font-mono font-bold text-gray-200 text-[10px]">
-            {name}
-          </span>
-          {varData.address && (
-            <span className="text-[8px] font-mono text-gray-600 ml-auto">
-              {varData.address}
-            </span>
-          )}
-        </div>
-        {/* Array Cells */}
-        <div className="flex gap-1 overflow-x-auto pb-1 scrollbar-thin">
-          {varData.value.map((val, idx) => (
-            <div key={idx} className="flex flex-col items-center">
-              {/* Anchor dot for arrow targeting */}
-              <div
-                id={`var-${name}-${idx}`}
-                className="w-1 h-1 bg-cyan-400/50 rounded-full mb-1 opacity-100 transition-opacity" // Changed from opacity-0 to see anchors contextually easier
-              />
-              <span className="text-[7px] text-gray-500 font-mono mb-0.5">{idx}</span>
-              <div
-                className="bg-amber-950/[0.2] border border-amber-700/[0.3] px-1.5 py-1 min-w-[24px] flex items-center justify-center rounded-sm"
-              >
-                <span className="font-mono text-[10px] text-amber-300 font-bold">{val}</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
+    <div className="mt-2 bg-emerald-950/40 rounded border border-emerald-500/30 px-2.5 py-1.5 flex items-center gap-2 animate-[fadeIn_0.3s_ease-out]">
+      <span className="text-emerald-400 text-xs">↩</span>
+      <span className="font-mono text-[10px] font-bold text-emerald-300">return</span>
+      {expression && (
+        <span className="font-mono text-[10px] text-emerald-400/60">
+          {expression}
+        </span>
+      )}
+      <span className="text-emerald-500/60 text-[10px]">=</span>
+      <span className="font-mono text-sm font-bold text-emerald-300">
+        {String(varData.value)}
+      </span>
     </div>
   );
 };

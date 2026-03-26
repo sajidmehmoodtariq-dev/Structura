@@ -28,8 +28,8 @@ const ControlPanel = ({
         {/* Step Back */}
         <button
           onClick={onStepBack}
-          disabled={currentStep === 0 || isPlaying}
-          className={`p-1 rounded transition-colors group ${currentStep > 0 && !isPlaying
+          disabled={currentStep === 0}
+          className={`p-1 rounded transition-colors group ${currentStep > 0
             ? 'hover:bg-[#30363d] text-gray-400 hover:text-white'
             : 'text-gray-700 cursor-not-allowed'
             }`}
@@ -64,8 +64,8 @@ const ControlPanel = ({
         {/* Step Forward */}
         <button
           onClick={onStepForward}
-          disabled={currentStep >= totalSteps || isPlaying}
-          className={`p-1 rounded transition-colors group ${currentStep < totalSteps && !isPlaying
+          disabled={currentStep >= totalSteps}
+          className={`p-1 rounded transition-colors group ${currentStep < totalSteps
             ? 'hover:bg-[#30363d] text-gray-400 hover:text-white'
             : 'text-gray-700 cursor-not-allowed'
             }`}
