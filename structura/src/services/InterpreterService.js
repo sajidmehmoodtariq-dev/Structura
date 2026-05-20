@@ -1687,6 +1687,20 @@ class InterpreterService {
         continue;
       }
 
+      // Struct field access: node->data
+      const fieldAccessMatch = trimmed.match(/^(\w+)->(\w+)/);
+      if (fieldAccessMatch) {
+        output += `{${fieldAccessMatch[1]}->${fieldAccessMatch[2]}}`;
+        continue;
+      }
+
+      // Array subscript: arr[2], pArr[2]
+      const subscriptMatch = trimmed.match(/^(\w+)\[(\d+)\]/);
+      if (subscriptMatch) {
+        output += `{${subscriptMatch[1]}[${subscriptMatch[2]}]}`;
+        continue;
+      }
+
       // Variable reference
       const varMatch = trimmed.match(/^(\w+)/);
       if (varMatch) {
@@ -1943,6 +1957,16 @@ class InterpreterService {
                 return String(heapObj.value);
               }
 
+              // Check if intermediate points to a regular variable: &varName
+              const varRef2 = intermediateValueStr.match(/^&(\w+)$/);
+              if (varRef2) {
+                const targetVar = currentFrame.variables[varRef2[1]];
+                if (targetVar) {
+                  console.log('✅ Double Deref to variable SUCCESS! Returning:', targetVar.value);
+                  return String(targetVar.value);
+                }
+              }
+
               // Check if intermediate points to array element
               const arrayMatch = intermediateValueStr.match(/^(.+)\[(\d+)\]$/);
               if (arrayMatch) {
@@ -2014,7 +2038,39 @@ class InterpreterService {
               return match;
             });
 
-            // 3. Replace {varName} with actual value (plain variables)
+            // 3. Replace {ptrName->field} - struct field access via pointer
+            outputText = outputText.replace(/\{(\w+)->(\w+)\}/g, (match, ptrName, fieldName) => {
+              const ptrData = currentFrame.variables[ptrName];
+              if (!ptrData) return match;
+              const heapObj = currentState.heap?.[ptrData.value];
+              if (heapObj && heapObj.value && typeof heapObj.value === 'object') {
+                const fieldVal = heapObj.value[fieldName];
+                if (fieldVal !== undefined) return String(fieldVal);
+              }
+              return match;
+            });
+
+            // 4. Replace {varName[index]} - array subscript or pointer subscript
+            outputText = outputText.replace(/\{(\w+)\[(\d+)\]\}/g, (match, varName, indexStr) => {
+              const index = parseInt(indexStr);
+              const varData = currentFrame.variables[varName];
+              if (!varData) return match;
+              if (Array.isArray(varData.value)) {
+                return varData.value[index] !== undefined ? String(varData.value[index]) : match;
+              }
+              // Pointer subscript: pArr[2] where pArr.value = "arr[0]"
+              const ptrBaseMatch = String(varData.value).match(/^(.+)\[(\d+)\]$/);
+              if (ptrBaseMatch) {
+                const actualIndex = parseInt(ptrBaseMatch[2]) + index;
+                const arrayVar = currentFrame.variables[ptrBaseMatch[1]];
+                if (arrayVar && Array.isArray(arrayVar.value) && arrayVar.value[actualIndex] !== undefined) {
+                  return String(arrayVar.value[actualIndex]);
+                }
+              }
+              return match;
+            });
+
+            // 5. Replace {varName} with actual value (plain variables)
             outputText = outputText.replace(/\{(\w+)\}/g, (match, varName) => {
               const varData = currentFrame.variables[varName];
               console.log('🔍 Replacing {' + varName + '}:', varData);
@@ -2025,9 +2081,31 @@ class InterpreterService {
           console.log('🔍 Final output text:', outputText);
         }
 
-        // Fallback: resolve any remaining {varName} placeholders from runtimeVariables
-        // (handles cases where viz state is stale due to async React updates)
+        // Fallback: resolve any remaining placeholders from runtimeVariables
         if (outputText.includes('{')) {
+          outputText = outputText.replace(/\{(\w+)->(\w+)\}/g, (match, ptrName, fieldName) => {
+            const varData = this.runtimeVariables.get(ptrName);
+            if (!varData) return match;
+            // Heap lookup via vizActions state isn't available here; skip heap resolution
+            return match;
+          });
+          outputText = outputText.replace(/\{(\w+)\[(\d+)\]\}/g, (match, varName, indexStr) => {
+            const index = parseInt(indexStr);
+            const varData = this.runtimeVariables.get(varName);
+            if (!varData) return match;
+            if (Array.isArray(varData.value) && varData.value[index] !== undefined) {
+              return String(varData.value[index]);
+            }
+            const ptrBaseMatch = String(varData.value).match(/^(.+)\[(\d+)\]$/);
+            if (ptrBaseMatch) {
+              const actualIndex = parseInt(ptrBaseMatch[2]) + index;
+              const arrayData = this.runtimeVariables.get(ptrBaseMatch[1]);
+              if (arrayData && Array.isArray(arrayData.value) && arrayData.value[actualIndex] !== undefined) {
+                return String(arrayData.value[actualIndex]);
+              }
+            }
+            return match;
+          });
           outputText = outputText.replace(/\{(\w+)\}/g, (match, varName) => {
             const varData = this.runtimeVariables.get(varName);
             if (varData && varData.value !== undefined && varData.value !== '?') {
