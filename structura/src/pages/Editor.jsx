@@ -327,12 +327,15 @@ int main() {
     let nextStep = currentStep;
     if (nextStep >= stepsRef.current.length) return;
 
-    // Skip steps that belong to untaken branches (supports nested if/else)
+    // Skip steps that belong to untaken branches (supports nested if/else and switch)
     while (nextStep < stepsRef.current.length) {
       const step = stepsRef.current[nextStep];
       if (step.conditionalBranches && step.conditionalBranches.length > 0) {
         const shouldSkip = step.conditionalBranches.some(({ branch, parent }) => {
-          return skipBranchesRef.current.get(parent) === branch;
+          const skipInfo = skipBranchesRef.current.get(parent);
+          if (!skipInfo) return false;
+          if (skipInfo instanceof Set) return skipInfo.has(branch);
+          return skipInfo === branch;
         });
         if (shouldSkip) {
           nextStep++;
@@ -346,14 +349,32 @@ int main() {
 
     const step = stepsRef.current[nextStep];
 
-    // Evaluate condition for IF_STATEMENT
+    // Evaluate control flow for branching statements
     if (step.type === 'IF_STATEMENT') {
       const condResult = interpreterRef.current.evaluateConditionFromState(step.data.condition);
-      if (condResult) {
-        skipBranchesRef.current.set(nextStep, 'if-false');
-      } else {
-        skipBranchesRef.current.set(nextStep, 'if-true');
+      const toSkip = new Set();
+      toSkip.add(condResult ? 'if-false' : 'if-true');
+      skipBranchesRef.current.set(nextStep, toSkip);
+    } else if (step.type === 'SWITCH_STATEMENT') {
+      const varData = interpreterRef.current.runtimeVariables.get(step.data.variable);
+      const switchValue = varData?.value;
+      const toSkip = new Set();
+      const steps = stepsRef.current;
+      for (let j = nextStep + 1; j < steps.length; j++) {
+        if (!steps[j].conditionalBranches) continue;
+        for (const cb of steps[j].conditionalBranches) {
+          if (cb.parent === nextStep && cb.branch.startsWith('case-')) {
+            toSkip.add(cb.branch);
+          }
+        }
       }
+      const matchKey = `case-${switchValue}`;
+      if (toSkip.has(matchKey)) {
+        toSkip.delete(matchKey);
+      } else {
+        toSkip.delete('case-default');
+      }
+      skipBranchesRef.current.set(nextStep, toSkip);
     }
 
     highlightLine(step.line);
@@ -427,7 +448,7 @@ int main() {
           const varData = interpreterRef.current.runtimeVariables.get(step.data.variable);
           const switchValue = varData?.value;
           const toSkip = new Set();
-          for (let j = i + 1; j < targetStep; j++) {
+          for (let j = i + 1; j < stepsRef.current.length; j++) {
             const fs = stepsRef.current[j];
             if (!fs.conditionalBranches) continue;
             for (const cb of fs.conditionalBranches) {

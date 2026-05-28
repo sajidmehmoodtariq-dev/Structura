@@ -3,6 +3,7 @@ import PointerArrow from './PointerArrow';
 import HeapBlock from './HeapBlock';
 import ArrayCanvas from './ArrayCanvas';
 import RecursionTreeCanvas from './RecursionTreeCanvas';
+import DataStructureView from './DataStructureView';
 
 // Variable names that are commonly used as array indices in sorting/search algorithms
 const INDEX_VAR_NAMES = new Set([
@@ -14,6 +15,7 @@ const INDEX_VAR_NAMES = new Set([
 
 const VIZ_MODES = [
   { key: 'stack-heap', label: 'Stack & Heap', icon: '⬛' },
+  { key: 'ds-view', label: 'DS View', icon: '⟨⟩' },
   { key: 'recursion-tree', label: 'Recursion Tree', icon: '🌳' },
 ];
 
@@ -113,7 +115,7 @@ const MemoryVisualization = ({ vizState, arrayAnimState = {}, steps = [], curren
         <div className="mr-auto">
           <h2 className="text-xs font-bold text-white">Memory Visualization</h2>
           <p className="text-[10px] text-gray-500 mt-0.5">
-            {vizMode === 'stack-heap' ? 'Real-time Stack & Heap' : 'Recursive Call Tree'}
+            {vizMode === 'stack-heap' ? 'Real-time Stack & Heap' : vizMode === 'ds-view' ? 'Stack / Queue Visualizer' : 'Recursive Call Tree'}
           </p>
         </div>
 
@@ -140,6 +142,42 @@ const MemoryVisualization = ({ vizState, arrayAnimState = {}, steps = [], curren
       {/* Recursion Tree View */}
       {vizMode === 'recursion-tree' && (
         <RecursionTreeCanvas steps={steps} currentStep={currentStep} />
+      )}
+
+      {/* DS View — stack bucket / queue tube, heap hidden */}
+      {vizMode === 'ds-view' && (
+        <div id="arrow-container" className="flex-1 flex overflow-hidden relative">
+          {/* Left: call stack frames (narrower) */}
+          <div className="w-[35%] bg-[#161b22] border-r border-[#30363d] p-2 overflow-y-auto flex flex-col gap-2 relative z-10 shadow-xl shadow-black/20">
+            <div className="flex items-center gap-1.5 pb-1 border-b border-[#30363d] sticky top-0 bg-[#161b22] z-20">
+              <svg className="w-3 h-3 text-cyan-400" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M3 4a1 1 0 011-1h12a1 1 0 011 1v2a1 1 0 01-1 1H4a1 1 0 01-1-1V4zM3 10a1 1 0 011-1h6a1 1 0 011 1v6a1 1 0 01-1 1H4a1 1 0 01-1-1v-6zM14 9a1 1 0 00-1 1v6a1 1 0 001 1h2a1 1 0 001-1v-6a1 1 0 00-1-1h-2z" />
+              </svg>
+              <h3 className="text-[10px] font-bold text-cyan-400 uppercase tracking-wider">Call Stack</h3>
+            </div>
+            {vizState.stack.length === 0 ? (
+              <div className="text-center py-4">
+                <div className="text-gray-600 text-xs italic">Stack is empty</div>
+                <div className="text-gray-700 text-[10px] mt-1">Press Run</div>
+              </div>
+            ) : (
+              <div className="space-y-3 pb-8">
+                {[...vizState.stack].reverse().map((frame, frameIdx) => (
+                  <StackFrame
+                    key={frame.id}
+                    frame={frame}
+                    frameIdx={frameIdx}
+                    onHoverVar={setHoveredVar}
+                    arrayAnimState={arrayAnimState}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Right: DS visualization (heap hidden) */}
+          <DataStructureView vizState={vizState} />
+        </div>
       )}
 
       {/* Memory Layout with Arrow Container */}
