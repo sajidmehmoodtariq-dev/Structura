@@ -433,6 +433,77 @@ int main() {
         }
       ]
     },
+    stl: {
+      title: 'STL Containers',
+      icon: '📦',
+      items: [
+        {
+          name: 'vector Basics',
+          code: `#include <iostream>
+using namespace std;
+
+int main() {
+    // Empty vector — size 0, capacity 0
+    vector<int> nums;
+
+    // push_back appends and grows dynamically
+    nums.push_back(10);
+    nums.push_back(25);
+    nums.push_back(37);
+
+    // pop_back removes the last element
+    // size shrinks but capacity stays the same
+    nums.pop_back();
+
+    return 0;
+}`
+        },
+        {
+          name: 'Capacity Doubling',
+          code: `#include <iostream>
+using namespace std;
+
+int main() {
+    vector<int> v;
+
+    // Watch the capacity bar in the visualization:
+    // Each time size reaches capacity, the vector
+    // allocates a new buffer (2x larger) on the heap
+    // and copies every element over.
+
+    v.push_back(1);   // size=1 cap=1
+    v.push_back(2);   // size=2 cap=2  (realloc!)
+    v.push_back(3);   // size=3 cap=4  (realloc!)
+    v.push_back(4);   // size=4 cap=4
+    v.push_back(5);   // size=5 cap=8  (realloc!)
+    v.push_back(6);   // size=6 cap=8
+    v.push_back(7);   // size=7 cap=8
+
+    return 0;
+}`
+        },
+        {
+          name: 'Memory Leak Warning',
+          code: `#include <iostream>
+using namespace std;
+
+int main() {
+    // Both blocks are allocated on the heap...
+    int* a = new int(42);
+    int* b = new int(99);
+
+    // ...but only one is freed.
+    delete a;
+
+    // When main() returns, 'b' is still live on the heap.
+    // Watch the LEAKED badge appear on the heap block
+    // and the red warning banner in the heap panel.
+
+    return 0;
+}`
+        }
+      ]
+    },
     algorithms: {
       title: 'Algorithms',
       icon: '📊',

@@ -64,13 +64,24 @@ export const analyzerMethods = {
         this.analyzeDeclaration(node);
         break;
 
-      case 'expression_statement':
-        if (node.namedChild(0)?.type === 'call_expression') {
-          this.analyzeFunctionCall(node.namedChild(0));
+      case 'expression_statement': {
+        const exprChild = node.namedChild(0);
+        if (exprChild?.type === 'call_expression') {
+          this.analyzeFunctionCall(exprChild);
+        } else if (exprChild?.type === 'delete_expression') {
+          const operand = exprChild.namedChild(0);
+          if (operand) {
+            this.executionSteps.push({
+              type: 'FREE_HEAP',
+              line: node.startPosition.row + 1,
+              data: { ptrName: operand.text }
+            });
+          }
         } else {
           this.analyzeExpressionStatement(node);
         }
         break;
+      }
 
       case 'if_statement':
         this.analyzeIfStatement(node);
@@ -102,6 +113,12 @@ export const analyzerMethods = {
   analyzeDeclaration(node) {
     const typeNode = node.childForFieldName('type');
     const type = typeNode ? typeNode.text : 'unknown';
+
+    // Detect std::vector declarations
+    if (/^(std::)?vector\s*</.test(type)) {
+      this.analyzeVectorDeclaration(node, type);
+      return;
+    }
 
     for (let i = 0; i < node.namedChildCount; i++) {
       const child = node.namedChild(i);
@@ -316,6 +333,13 @@ export const analyzerMethods = {
 
   analyzeFunctionCall(node, targetVarName = null) {
     const functionNameNode = node.childForFieldName('function');
+
+    // Route method calls (v.push_back, v.pop_back, etc.) to the method handler
+    if (functionNameNode?.type === 'field_expression') {
+      this.analyzeMethodCall(node);
+      return;
+    }
+
     const functionName = functionNameNode ? functionNameNode.text : 'unknown';
     const argsNode = node.childForFieldName('arguments');
 
@@ -987,6 +1011,118 @@ export const analyzerMethods = {
       }
     } else {
       this.analyzeStatement(node);
+    }
+  },
+
+  // ── STL vector declaration ─────────────────────────────────────────────────
+
+  analyzeVectorDeclaration(node, type) {
+    const innerTypeMatch = type.match(/(?:std::)?vector\s*<\s*(.+?)\s*>/);
+    const elemType = innerTypeMatch?.[1] ?? 'int';
+    const shortType = type.replace('std::', '');
+
+    let varName = null;
+    let initialElements = [];
+
+    for (let i = 0; i < node.namedChildCount; i++) {
+      const child = node.namedChild(i);
+      if (child.type === 'init_declarator') {
+        const decl = child.childForFieldName('declarator');
+        varName = decl ? decl.text : null;
+        const val = child.childForFieldName('value');
+        if (val?.type === 'initializer_list') {
+          for (let j = 0; j < val.namedChildCount; j++) {
+            initialElements.push(this.evaluateExpression(val.namedChild(j), true));
+          }
+        }
+      } else if (child.type === 'identifier') {
+        varName = child.text;
+      }
+    }
+
+    if (!varName) return;
+
+    const initCap = initialElements.length === 0 ? 0 : initialElements.length;
+    const heapAddr = `0x5F${Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0')}`;
+    const stackAddr = this.generateAddress();
+
+    const vectorValue = {
+      __stl: 'vector',
+      elements: [...initialElements],
+      size: initialElements.length,
+      capacity: initCap,
+      heapAddr,
+      elemType
+    };
+
+    this.variableAddresses.set(varName, stackAddr);
+    this.analysisVariables.set(varName, vectorValue);
+
+    this.executionSteps.push({
+      type: 'SET_VARIABLE',
+      line: node.startPosition.row + 1,
+      data: { name: varName, value: vectorValue, type: shortType, address: stackAddr }
+    });
+  },
+
+  // ── Method calls on STL containers ────────────────────────────────────────
+
+  analyzeMethodCall(callNode) {
+    const funcNode = callNode.childForFieldName('function');
+    if (!funcNode || funcNode.type !== 'field_expression') return;
+
+    const objectNode = funcNode.childForFieldName('argument') || funcNode.namedChild(0);
+    const fieldNode  = funcNode.childForFieldName('field')    || funcNode.namedChild(1);
+    const objectName = objectNode?.text;
+    const methodName = fieldNode?.text;
+    if (!objectName || !methodName) return;
+
+    const varData = this.analysisVariables.get(objectName);
+    if (!varData?.__stl) return;
+
+    const argsNode = callNode.childForFieldName('arguments');
+    const line = callNode.startPosition.row + 1;
+
+    if (varData.__stl === 'vector') {
+      if (methodName === 'push_back') {
+        let argValue = 0;
+        let argText  = '0';
+        if (argsNode && argsNode.namedChildCount > 0) {
+          const argNode = argsNode.namedChild(0);
+          argValue = this.evaluateExpression(argNode, true);
+          argText  = argNode.text;
+        }
+        this.executionSteps.push({
+          type: 'STL_OP',
+          line,
+          data: { container: 'vector', op: 'push_back', name: objectName, value: argValue, valueText: argText }
+        });
+        varData.elements.push(typeof argValue === 'number' ? argValue : 0);
+        varData.size++;
+        if (varData.size > varData.capacity) {
+          varData.capacity = varData.capacity === 0 ? 1 : varData.capacity * 2;
+        }
+        this.analysisVariables.set(objectName, varData);
+
+      } else if (methodName === 'pop_back') {
+        this.executionSteps.push({
+          type: 'STL_OP',
+          line,
+          data: { container: 'vector', op: 'pop_back', name: objectName }
+        });
+        if (varData.size > 0) { varData.elements.pop(); varData.size--; }
+        this.analysisVariables.set(objectName, varData);
+
+      } else if (methodName === 'clear') {
+        this.executionSteps.push({
+          type: 'STL_OP',
+          line,
+          data: { container: 'vector', op: 'clear', name: objectName }
+        });
+        varData.elements = [];
+        varData.size = 0;
+        this.analysisVariables.set(objectName, varData);
+      }
     }
   },
 };

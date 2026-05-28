@@ -547,6 +547,46 @@ export const stepExecutorMethods = {
         });
         break;
 
+      case 'FREE_HEAP': {
+        const ptrData = this.runtimeVariables.get(step.data.ptrName);
+        const addr = ptrData?.value;
+        if (addr && typeof addr === 'string' && addr.startsWith('0x')) {
+          this.vizActions.freeHeap(addr);
+        }
+        break;
+      }
+
+      case 'STL_OP': {
+        const varData = this.runtimeVariables.get(step.data.name);
+        if (!varData || !varData.value?.__stl) break;
+
+        const vec = { ...varData.value, elements: [...varData.value.elements] };
+
+        if (step.data.op === 'push_back') {
+          let val = step.data.value;
+          if (step.data.valueText) {
+            const rv = this.evaluateRuntimeExpression(String(step.data.valueText));
+            if (typeof rv === 'number') val = rv;
+          }
+          if (vec.size >= vec.capacity) {
+            vec.capacity = vec.capacity === 0 ? 1 : vec.capacity * 2;
+          }
+          vec.elements.push(val);
+          vec.size++;
+
+        } else if (step.data.op === 'pop_back') {
+          if (vec.size > 0) { vec.elements.pop(); vec.size--; }
+
+        } else if (step.data.op === 'clear') {
+          vec.elements = [];
+          vec.size = 0;
+        }
+
+        this.runtimeVariables.set(step.data.name, { ...varData, value: vec });
+        this.vizActions.setVariable(step.data.name, vec, varData.type, varData.address);
+        break;
+      }
+
       case 'POINTER_INCREMENT':
         {
           const ptrData = this.runtimeVariables.get(step.data.name);

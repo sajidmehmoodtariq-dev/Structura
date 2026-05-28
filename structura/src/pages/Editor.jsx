@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
+import { useLocation } from 'react-router-dom';
 import MonacoEditor from '@monaco-editor/react';
 import parserService from '../services/ParserService';
 import InterpreterService from '../services/InterpreterService';
@@ -7,6 +8,7 @@ import MemoryVisualization from '../components/MemoryVisualization';
 import ControlPanel from '../components/ControlPanel';
 import ConsoleOutput from '../components/ConsoleOutput';
 import CodeSnippets from '../components/CodeSnippets';
+import AITutorPanel from '../components/AITutorPanel';
 
 const Editor = () => {
   const { state: vizState, actions: vizActions, getState } = useVisualization();
@@ -510,6 +512,19 @@ int main() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Open AI Tutor panel when navigated with ?ai=1
+  const location = useLocation();
+  useEffect(() => {
+    try {
+      const params = new URLSearchParams(location.search);
+      if (params.get('ai') === '1') {
+        setAiTutorOpen(true);
+      }
+    } catch (e) {
+      // ignore
+    }
+  }, [location.search]);
+
   const handleEditorDidMount = (editor, _monaco) => {
     editorRef.current = editor;
 
@@ -589,29 +604,20 @@ int main() {
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[10px] text-gray-500 font-mono">C++17</span>
-              {/* Gemini Analysis Button */}
-              <div className="relative">
-                <button
-                  onClick={() => setAiTutorOpen(!aiTutorOpen)}
-                  className="bg-linear-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 px-2.5 py-1 rounded-md text-[11px] font-semibold shadow-lg transition-all flex items-center gap-1.5"
-                >
-                  <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 20 20">
-                    <path d="M10 2a6 6 0 00-6 6v3.586l-.707.707A1 1 0 004 14h12a1 1 0 00.707-1.707L16 11.586V8a6 6 0 00-6-6zM10 18a3 3 0 01-3-3h6a3 3 0 01-3 3z" />
-                  </svg>
-                  Gemini
-                </button>
-                {aiTutorOpen && (
-                  <div className="absolute right-0 top-full mt-2 z-50 bg-gray-900 border border-purple-500/30 rounded-lg p-3 shadow-2xl backdrop-blur-sm w-64">
-                    <div className="flex items-start gap-2.5">
-                      <div className="w-2 h-2 bg-green-400 rounded-full mt-1 animate-pulse shrink-0"></div>
-                      <div>
-                        <p className="text-xs font-semibold text-green-400 mb-0.5">Logic Check: Safe</p>
-                        <p className="text-[11px] text-gray-300">No memory leaks detected. Pointer usage is correct.</p>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
+              {/* AI Tutor toggle */}
+              <button
+                onClick={() => setAiTutorOpen(!aiTutorOpen)}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-all flex items-center gap-1.5 ${
+                  aiTutorOpen
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-linear-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white'
+                }`}
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                </svg>
+                AI Tutor
+              </button>
             </div>
           </div>
 
@@ -645,7 +651,7 @@ int main() {
         </div>
 
         {/* Right Side - Visualization Stage */}
-        <div className="flex-[3] flex flex-col">
+        <div className="flex-3 flex flex-col min-w-0">
           <MemoryVisualization
             vizState={vizState}
             arrayAnimState={arrayAnimState}
@@ -681,6 +687,16 @@ int main() {
             onStepForward={handleStepForward}
           />
         </div>
+
+        {/* AI Tutor slide-in panel */}
+        <AITutorPanel
+          isOpen={aiTutorOpen}
+          onClose={() => setAiTutorOpen(false)}
+          code={code}
+          steps={stepsRef.current}
+          currentStep={currentStep}
+          vizState={vizState}
+        />
       </div>
     </div>
   );

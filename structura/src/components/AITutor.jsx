@@ -1,5 +1,6 @@
 import React from 'react';
 import { motion } from 'framer-motion';
+import { useNavigate } from 'react-router-dom';
 
 const AITutor = () => {
   const features = [
@@ -28,8 +29,21 @@ const AITutor = () => {
     { type: 'ai', text: 'I detected an infinite loop on line 23. Your counter variable is never incremented inside the while condition.' },
   ];
 
+  const navigate = useNavigate();
+
+  const openEditor = () => {
+    navigate('/editor?ai=1');
+  };
+
   return (
-    <section className="relative py-32 px-6">
+    <section
+      className="relative py-32 px-6 cursor-pointer"
+      role="button"
+      tabIndex={0}
+      onClick={openEditor}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openEditor(); }}
+      aria-label="Open AI Tutor in Editor"
+    >
       {/* Animated background */}
       <div className="absolute inset-0 overflow-hidden">
         <motion.div
