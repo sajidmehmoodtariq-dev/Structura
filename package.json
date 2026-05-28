@@ -1,0 +1,15 @@
+{
+  "name": "structura-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "frontend:dev": "npm run dev --prefix structura",
+    "frontend:build": "npm run build --prefix structura",
+    "tauri": "tauri",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  }
+}

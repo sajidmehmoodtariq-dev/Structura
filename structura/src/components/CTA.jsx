@@ -1,5 +1,6 @@
 import React from 'react';
 import { motion } from 'framer-motion';
+import { RELEASES_URL, isTauri } from '../config';
 
 const CTA = () => {
   return (
@@ -84,13 +85,17 @@ const CTA = () => {
               </span>
             </motion.button>
 
-            <motion.button
-              className="px-10 py-5 bg-white/10 backdrop-blur-sm text-white rounded-xl font-bold text-lg border-2 border-white/20 hover:bg-white/20 transition-all"
-              whileHover={{ scale: 1.05, y: -3 }}
-              whileTap={{ scale: 0.98 }}
-            >
-              Download for Desktop
-            </motion.button>
+            {!isTauri() && (
+              <a href={RELEASES_URL} target="_blank" rel="noopener noreferrer">
+                <motion.button
+                  className="px-10 py-5 bg-white/10 backdrop-blur-sm text-white rounded-xl font-bold text-lg border-2 border-white/20 hover:bg-white/20 transition-all"
+                  whileHover={{ scale: 1.05, y: -3 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  Download for Desktop
+                </motion.button>
+              </a>
+            )}
           </div>
 
           {/* Additional info */}

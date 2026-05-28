@@ -22,22 +22,26 @@ Structura is an interactive, web-based educational tool designed to visualize C+
 ## 🚀 Getting Started
 
 ### Prerequisites
+
 - Node.js (v18 or higher recommended)
 
 ### Installation
 
 1. Clone the repository:
+
    ```bash
    git clone https://github.com/sajidmehmoodtariq-dev/Structura.git
    cd structura
    ```
 
 2. Install the necessary dependencies:
+
    ```bash
    npm install
    ```
 
 3. Start the development server:
+
    ```bash
    npm run dev
    ```

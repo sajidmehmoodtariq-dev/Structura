@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
+import { RELEASES_URL, isTauri } from '../config';
 
 const Hero = () => {
   const codeSnippets = [
@@ -128,13 +129,17 @@ const Hero = () => {
               </motion.button>
             </Link>
             
-            <motion.button
-              className="px-8 py-4 bg-white/10 backdrop-blur-sm text-white rounded-lg font-semibold text-lg border border-white/20 hover:bg-white/20 transition-all"
-              whileHover={{ scale: 1.05, y: -2 }}
-              whileTap={{ scale: 0.98 }}
-            >
-              Download Desktop App
-            </motion.button>
+            {!isTauri() && (
+              <a href={RELEASES_URL} target="_blank" rel="noopener noreferrer">
+                <motion.button
+                  className="px-8 py-4 bg-white/10 backdrop-blur-sm text-white rounded-lg font-semibold text-lg border border-white/20 hover:bg-white/20 transition-all"
+                  whileHover={{ scale: 1.05, y: -2 }}
+                  whileTap={{ scale: 0.98 }}
+                >
+                  Download Desktop App
+                </motion.button>
+              </a>
+            )}
           </motion.div>
 
           {/* Status badges */}

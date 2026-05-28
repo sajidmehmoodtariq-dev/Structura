@@ -60,7 +60,7 @@ const AITutor = () => {
           transition={{ duration: 0.6 }}
         >
           <motion.div
-            className="inline-block mb-4 px-4 py-2 bg-gradient-to-r from-purple-500/20 to-pink-500/20 rounded-full border border-purple-500/30"
+            className="inline-block mb-4 px-4 py-2 bg-linear-to-r from-purple-500/20 to-pink-500/20 rounded-full border border-purple-500/30"
             initial={{ scale: 0.9 }}
             whileInView={{ scale: 1 }}
             viewport={{ once: true }}
@@ -83,7 +83,7 @@ const AITutor = () => {
             whileInView={{ opacity: 1, x: 0 }}
             viewport={{ once: true }}
             transition={{ duration: 0.6 }}
-            className="bg-gradient-to-br from-[#0f1629] to-[#1a1f3a] rounded-2xl p-8 border border-white/10 shadow-2xl"
+            className="bg-linear-to-r from-primary-light to-primary-medium rounded-2xl p-8 border border-white/10 shadow-2xl"
           >
             <div className="flex items-center gap-3 mb-6 pb-4 border-b border-white/10">
               <div className="w-3 h-3 rounded-full bg-red-500" />
@@ -175,7 +175,7 @@ const AITutor = () => {
                 <div className="bg-white/5 backdrop-blur-sm rounded-xl p-6 border border-white/10 hover:border-white/20 transition-all">
                   <div className="flex items-start gap-4">
                     <motion.div
-                      className={`text-5xl flex-shrink-0`}
+                      className={`text-5xl flex-0`}
                       whileHover={{ scale: 1.2, rotate: 10 }}
                       transition={{ type: "spring", stiffness: 300 }}
                     >
@@ -185,7 +185,7 @@ const AITutor = () => {
                       <h3 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
                         {feature.title}
                         <motion.span
-                          className={`text-transparent bg-clip-text bg-gradient-to-r ${feature.gradient}`}
+                          className={`text-transparent bg-clip-text bg-linear-to-r ${feature.gradient}`}
                           initial={{ opacity: 0, x: -10 }}
                           whileHover={{ opacity: 1, x: 0 }}
                         >
@@ -200,7 +200,7 @@ const AITutor = () => {
                   
                   {/* Gradient bar */}
                   <motion.div
-                    className={`h-1 mt-4 rounded-full bg-gradient-to-r ${feature.gradient} opacity-0 group-hover:opacity-100 transition-opacity`}
+                    className={`h-1 mt-4 rounded-full bg-linear-to-r ${feature.gradient} opacity-0 group-hover:opacity-100 transition-opacity`}
                     initial={{ scaleX: 0 }}
                     whileHover={{ scaleX: 1 }}
                     transition={{ duration: 0.3 }}
