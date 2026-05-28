@@ -82,60 +82,118 @@ export const stepExecutorMethods = {
         break;
 
       case 'CALL':
-        this.callStack.push(new Map(this.runtimeVariables));
-        this.vizActions.pushFrame(step.data.name);
-        this.runtimeVariables = new Map();
+        {
+          // Evaluate each argument against current runtimeVariables BEFORE clearing them.
+          // Static analysis stores args as estimates (e.g. 'pi - 1' as a string).
+          // We compute the actual runtime value here so PARAM_INIT can use it.
+          const runtimeEvaluatedArgs = (step.data.args || []).map(arg => {
+            const raw = this.evaluateRuntimeExpression(String(arg.text || ''));
+            const runtimeValue = Array.isArray(raw) ? [...raw] : raw;
+            return { ...arg, runtimeValue };
+          });
+          this.callArgStack.push({ args: runtimeEvaluatedArgs, paramCount: 0, mapping: new Map() });
+          this.callStack.push(new Map(this.runtimeVariables));
+          this.vizActions.pushFrame(step.data.name);
+          this.runtimeVariables = new Map();
+        }
         break;
 
       case 'PARAM_INIT':
         {
+          // Prefer the runtime-evaluated arg value (computed in CALL) over the analysis-time
+          // baked-in value. The baked-in value for 'pi - 1' is the string 'pi - 1', which
+          // causes NaN comparisons in IF_STATEMENT condition evaluation and corrupts recursion.
+          let paramValue = step.data.value;
+          if (this.callArgStack.length > 0) {
+            const frame = this.callArgStack[this.callArgStack.length - 1];
+            const callerArg = frame.args[frame.paramCount];
+            if (callerArg) {
+              const rv = callerArg.runtimeValue;
+              if (typeof rv === 'number' || Array.isArray(rv)) {
+                paramValue = rv;
+              }
+            }
+          }
+
           const paramAddr = this.generateAddress();
           this.runtimeVariables.set(step.data.name, {
-            value: step.data.value,
+            value: paramValue,
             type: step.data.type,
             address: paramAddr
           });
 
           this.vizActions.setVariable(
             step.data.name,
-            step.data.value,
+            paramValue,
             step.data.type,
             paramAddr
           );
+
+          // Map callee param name → caller variable name (for array propagation on return)
+          if (this.callArgStack.length > 0) {
+            const frame = this.callArgStack[this.callArgStack.length - 1];
+            const callerArg = frame.args[frame.paramCount];
+            if (callerArg) {
+              const callerArgText = callerArg.text || String(callerArg);
+              if (/^\w+$/.test(callerArgText)) {
+                frame.mapping.set(step.data.name, callerArgText);
+              }
+            }
+            frame.paramCount++;
+          }
         }
         break;
 
       case 'RETURN_FROM_CALL':
-        this.vizActions.popFrame();
-        if (this.callStack.length > 0) {
-          this.runtimeVariables = this.callStack.pop();
-        }
+        {
+          // Capture callee's array state before restoring caller frame
+          const calleeVars = new Map(this.runtimeVariables);
 
-        if (step.data.targetVar && this.lastReturnValue !== undefined) {
-          const targetVarName = step.data.targetVar;
-          const existingVar = this.runtimeVariables.get(targetVarName);
-
-          if (existingVar) {
-            this.runtimeVariables.set(targetVarName, {
-              ...existingVar,
-              value: this.lastReturnValue
-            });
-
-            if (!targetVarName.startsWith('__ret_temp_')) {
-              this.vizActions.setVariable(
-                targetVarName,
-                this.lastReturnValue,
-                existingVar.type,
-                existingVar.address
-              );
-            }
-
-            console.log(`↩️ Assigned return value ${this.lastReturnValue} to ${targetVarName}`);
+          this.vizActions.popFrame();
+          if (this.callStack.length > 0) {
+            this.runtimeVariables = this.callStack.pop();
           }
-        }
 
-        this.lastReturnValue = null;
-        this.isReturning = false;
+          // Propagate modified arrays from callee params back to caller variables
+          if (this.callArgStack.length > 0) {
+            const frame = this.callArgStack.pop();
+            for (const [paramName, callerVarName] of frame.mapping) {
+              const calleeVar = calleeVars.get(paramName);
+              const callerVar = this.runtimeVariables.get(callerVarName);
+              if (calleeVar && callerVar && Array.isArray(calleeVar.value) && Array.isArray(callerVar.value)) {
+                this.runtimeVariables.set(callerVarName, { ...callerVar, value: calleeVar.value });
+                this.vizActions.setVariable(callerVarName, calleeVar.value, callerVar.type, callerVar.address);
+                console.log(`📦 Propagated array back: ${paramName} → ${callerVarName}`, calleeVar.value);
+              }
+            }
+          }
+
+          if (step.data.targetVar && this.lastReturnValue !== undefined) {
+            const targetVarName = step.data.targetVar;
+            const existingVar = this.runtimeVariables.get(targetVarName);
+
+            if (existingVar) {
+              this.runtimeVariables.set(targetVarName, {
+                ...existingVar,
+                value: this.lastReturnValue
+              });
+
+              if (!targetVarName.startsWith('__ret_temp_')) {
+                this.vizActions.setVariable(
+                  targetVarName,
+                  this.lastReturnValue,
+                  existingVar.type,
+                  existingVar.address
+                );
+              }
+
+              console.log(`↩️ Assigned return value ${this.lastReturnValue} to ${targetVarName}`);
+            }
+          }
+
+          this.lastReturnValue = null;
+          this.isReturning = false;
+        }
         break;
 
       case 'POP_FRAME':
@@ -400,24 +458,46 @@ export const stepExecutorMethods = {
 
       case 'UPDATE_ARRAY_ELEMENT':
         {
-          const arrData = this.runtimeVariables.get(step.data.arrayName);
-          if (arrData && Array.isArray(arrData.value)) {
-            const newArray = [...arrData.value];
-            const idx = typeof step.data.index === 'number' ? step.data.index : parseInt(step.data.index);
-            if (idx >= 0 && idx < newArray.length) {
-              newArray[idx] = step.data.value;
-              this.runtimeVariables.set(step.data.arrayName, {
-                ...arrData,
-                value: newArray
-              });
-              this.vizActions.setVariable(
-                step.data.arrayName,
-                newArray,
-                arrData.type,
-                arrData.address
-              );
-            }
+          // Prefer runtime-evaluated index/value over analysis-time estimates.
+          // Analysis-time values are wrong for VLA-based helpers like merge()
+          // because temp arrays (L[], R[]) evaluate to empty [] at analysis time.
+          let runtimeIdx = typeof step.data.index === 'number'
+            ? step.data.index : parseInt(step.data.index);
+          let runtimeVal = step.data.value;
+
+          if (step.data.indexText !== undefined) {
+            const ei = this.evaluateRuntimeExpression(String(step.data.indexText));
+            if (typeof ei === 'number') runtimeIdx = ei;
           }
+          if (step.data.valueText !== undefined) {
+            const ev = this.evaluateRuntimeExpression(String(step.data.valueText));
+            if (typeof ev === 'number') runtimeVal = ev;
+          }
+
+          // Mutate step.data so the tree canvas sees correct values on next render
+          step.data.index = runtimeIdx;
+          step.data.value = runtimeVal;
+
+          if (typeof runtimeIdx !== 'number' || isNaN(runtimeIdx) || runtimeIdx < 0) break;
+
+          const arrData = this.runtimeVariables.get(step.data.arrayName);
+          const existingArr = arrData ? [...arrData.value] : [];
+
+          // Grow array as needed — this handles VLAs (int L[n1]) which the analyzer
+          // initialises to [] because n1 is not a compile-time constant.
+          while (existingArr.length <= runtimeIdx) existingArr.push(0);
+          existingArr[runtimeIdx] = runtimeVal;
+
+          this.runtimeVariables.set(step.data.arrayName, {
+            ...(arrData || { type: 'int[]', address: this.generateAddress() }),
+            value: existingArr
+          });
+          this.vizActions.setVariable(
+            step.data.arrayName,
+            existingArr,
+            arrData?.type ?? 'int[]',
+            arrData?.address ?? ''
+          );
         }
         break;
 
@@ -667,6 +747,23 @@ export const stepExecutorMethods = {
       const varData = this.runtimeVariables.get(exprStr);
       if (varData !== undefined) {
         return typeof varData.value === 'number' ? varData.value : varData.value;
+      }
+      return 0;
+    }
+
+    // Handle array subscript access: name[expr]
+    // Must be checked BEFORE arithmetic splitting to avoid misparse of arr[l + i]
+    const subscriptMatch = exprStr.match(/^(\w+)\[(.+)\]$/);
+    if (subscriptMatch) {
+      const arrName = subscriptMatch[1];
+      const idxExpr = subscriptMatch[2].trim();
+      const idx = this.evaluateRuntimeExpression(idxExpr);
+      if (typeof idx === 'number') {
+        const arrVar = this.runtimeVariables.get(arrName);
+        if (arrVar && Array.isArray(arrVar.value)) {
+          const val = arrVar.value[idx];
+          if (val !== undefined) return val;
+        }
       }
       return 0;
     }

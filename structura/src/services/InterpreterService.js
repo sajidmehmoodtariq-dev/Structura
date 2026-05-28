@@ -19,6 +19,7 @@ class InterpreterService {
     this.functionMap = new Map();
     this.callDepth = 0;
     this.callStack = [];
+    this.callArgStack = []; // tracks param→callerVar mapping per call frame
     this.lastReturnValue = null;
     this.isReturning = false;
     this.analysisReturned = false;

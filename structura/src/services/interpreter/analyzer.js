@@ -484,7 +484,9 @@ export const analyzerMethods = {
           data: {
             arrayName: arrayName,
             index: indexVal,
-            value: newValue
+            indexText: indexExpr.text,   // original expression for runtime re-evaluation
+            value: newValue,
+            valueText: right.text         // original expression for runtime re-evaluation
           }
         });
 
@@ -905,6 +907,9 @@ export const analyzerMethods = {
         this.analyzeCompoundOrStatement(body);
       }
 
+      // A return inside the loop body exits the loop (and the function)
+      if (this.analysisReturned) break;
+
       this.executionSteps.push({
         type: 'EXIT_LOOP_ITERATION',
         line: body?.endPosition.row + 1 || node.startPosition.row + 1,
@@ -952,6 +957,9 @@ export const analyzerMethods = {
       if (body) {
         this.analyzeCompoundOrStatement(body);
       }
+
+      // A return inside the loop body exits the loop (and the function)
+      if (this.analysisReturned) break;
 
       if (update) {
         if (update.type === 'update_expression') {
